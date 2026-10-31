@@ -37,6 +37,8 @@ class CameraManager:
         self._frame_timestamps: deque[float] = deque(maxlen=30)
         self._last_capture_ms: float = 0.0
         self._current_fps: float = 0.0
+        self.backend_name: Optional[str] = None
+        self.last_error: Optional[str] = None
 
     def open(self) -> bool:
         """
@@ -45,25 +47,37 @@ class CameraManager:
         """
         self.release()
 
-        # Try DirectShow first on Windows
-        try:
-            self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
-            if not self.cap or not self.cap.isOpened():
-                self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_ANY)
-        except Exception:
-            self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_ANY)
+        # Windows webcam drivers vary; try the common backends before giving up.
+        errors = []
+        for name, backend in (("DSHOW", cv2.CAP_DSHOW), ("MSMF", cv2.CAP_MSMF), ("ANY", cv2.CAP_ANY)):
+            candidate = None
+            try:
+                candidate = cv2.VideoCapture(self.camera_index, backend)
+                if candidate is not None and candidate.isOpened():
+                    self.cap = candidate
+                    self.backend_name = name
+                    break
+                errors.append(name)
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+            if candidate is not None:
+                candidate.release()
 
-        if not self.cap or not self.cap.isOpened():
+        if self.cap is None or not self.cap.isOpened():
             self.is_open = False
+            self.last_error = f"Unable to open camera {self.camera_index}; attempted {', '.join(errors)}"
             return False
 
         # Set requested resolution and frame rate
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+        # Keep capture latency low when inference takes longer than one frame.
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         self.is_open = True
         self._frame_timestamps.clear()
+        self.last_error = None
         return True
 
     def read_frame(self) -> Tuple[bool, Optional[np.ndarray], float, Dict[str, Any]]:
@@ -100,6 +114,7 @@ class CameraManager:
         self._update_fps()
 
         if not ret or frame is None:
+            self.last_error = f"Camera {self.camera_index} opened with {self.backend_name} but returned no frame"
             return False, None, capture_ms, {
                 "fps": self._current_fps,
                 "brightness": 0.0,
@@ -168,6 +183,7 @@ class CameraManager:
                 pass
             self.cap = None
         self.is_open = False
+        self.backend_name = None
 
     def __enter__(self) -> CameraManager:
         self.open()

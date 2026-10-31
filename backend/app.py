@@ -152,6 +152,99 @@ def stream_events():
     )
 
 
+@app.route("/camera/stream", methods=["GET"])
+def stream_camera_preview():
+    """Serve a preview encoded by the Python vision worker (never browser-captured)."""
+    token = request.args.get("token")
+    if not token or token != SERVER_TOKEN:
+        return jsonify({"ok": False, "error": "Unauthorized: invalid or missing ?token="}), 401
+
+    def image_generator():
+        last_frame_index = -1
+        while True:
+            current_pipeline = pipeline
+            source = getattr(current_pipeline, "frame_source", None)
+            producer = getattr(source, "producer", None)
+            if producer is not None:
+                frame_index = producer.latest_jpeg_frame_index
+                jpeg = producer.latest_jpeg
+                if jpeg and frame_index != last_frame_index:
+                    last_frame_index = frame_index
+                    yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                           + str(len(jpeg)).encode("ascii") + b"\r\n\r\n" + jpeg + b"\r\n")
+            time.sleep(0.08)
+
+    return Response(image_generator(), mimetype="multipart/x-mixed-replace; boundary=frame",
+                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+@app.route("/vision/recenter", methods=["POST"])
+@require_token
+def vision_recenter():
+    """Recenter the Python pointer tracker using its most recent face landmarks."""
+    source = getattr(pipeline, "frame_source", None)
+    producer = getattr(source, "producer", None)
+    if producer is None or producer.use_mock:
+        return jsonify({"ok": False, "error": "Live Python camera tracking is not active."}), 503
+    ok, message = producer.recenter()
+    return jsonify({"ok": ok, "message": message}), (200 if ok else 409)
+
+
+@app.route("/vision/sensitivity", methods=["POST"])
+@require_token
+def vision_sensitivity():
+    data = request.get_json(silent=True) or {}
+    try:
+        value = float(data.get("value", 36))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Sensitivity must be between 10 and 100."}), 400
+    if not 10 <= value <= 100:
+        return jsonify({"ok": False, "error": "Sensitivity must be between 10 and 100."}), 400
+    source = getattr(pipeline, "frame_source", None)
+    producer = getattr(source, "producer", None)
+    if producer is None or producer.use_mock:
+        return jsonify({"ok": False, "error": "Live Python camera tracking is not active."}), 503
+    producer.set_user_sensitivity(value)
+    return jsonify({"ok": True, "sensitivity": value})
+
+
+@app.route("/vision/calibration/step", methods=["POST"])
+@require_token
+def vision_calibration_step():
+    data = request.get_json(silent=True) or {}
+    source = getattr(pipeline, "frame_source", None)
+    producer = getattr(source, "producer", None)
+    if producer is None or producer.use_mock:
+        return jsonify({"ok": False, "error": "Live Python camera tracking is not active."}), 503
+    try:
+        duration = max(1.0, min(8.0, float(data.get("duration_sec", 2.0))))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "duration_sec must be a number."}), 400
+    ok, message = producer.start_calibration_step(str(data.get("step", "")), duration)
+    return jsonify({"ok": ok, "message": message}), (200 if ok else 400)
+
+
+@app.route("/vision/calibration/commit", methods=["POST"])
+@require_token
+def vision_calibration_commit():
+    source = getattr(pipeline, "frame_source", None)
+    producer = getattr(source, "producer", None)
+    if producer is None or producer.use_mock:
+        return jsonify({"ok": False, "error": "Live Python camera tracking is not active."}), 503
+    ok, message = producer.commit_calibration()
+    return jsonify({"ok": ok, "message": message}), (200 if ok else 409)
+
+
+@app.route("/vision/calibration/cancel", methods=["POST"])
+@require_token
+def vision_calibration_cancel():
+    source = getattr(pipeline, "frame_source", None)
+    producer = getattr(source, "producer", None)
+    if producer is not None:
+        producer.cancel_calibration()
+    return jsonify({"ok": True})
+
+
 # -------------------------------------------------------------
 # CALIBRATION ENDPOINTS (Section D, B2)
 # -------------------------------------------------------------
@@ -276,6 +369,18 @@ def set_mode():
     bus.broadcast(ui_state)
     pipeline.emit_status()
     return jsonify({"ok": True, "mode": new_mode})
+
+
+@app.route("/control-mode", methods=["POST"])
+@require_token
+def set_control_mode():
+    data = request.get_json(silent=True) or {}
+    mode = data.get("mode")
+    if mode not in ("head", "speech", "mouse", "hybrid"):
+        return jsonify({"ok": False, "error": "Mode must be head, speech, mouse, or hybrid"}), 400
+    pipeline.control_mode = mode
+    pipeline.emit_status()
+    return jsonify({"ok": True, "mode": mode})
 
 
 @app.route("/channel/accept", methods=["POST"])

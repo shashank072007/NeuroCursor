@@ -60,8 +60,15 @@ class OSController:
         """Convert normalized (0..1) coordinates to pixels and move cursor.
         Returns clamped pixel coordinates (px, py).
         """
-        px = max(0, min(self.screen_w - 1, int(round(nx * self.screen_w))))
-        py = max(0, min(self.screen_h - 1, int(round(ny * self.screen_h))))
+        target_px = max(0, min(self.screen_w - 1, int(round(nx * self.screen_w))))
+        target_py = max(0, min(self.screen_h - 1, int(round(ny * self.screen_h))))
+
+        # Light lerp cuts high-frequency jitter without adding noticeable lag
+        alpha = 0.45
+        px = int(round(self.last_px * (1.0 - alpha) + target_px * alpha))
+        py = int(round(self.last_py * (1.0 - alpha) + target_py * alpha))
+        px = max(0, min(self.screen_w - 1, px))
+        py = max(0, min(self.screen_h - 1, py))
 
         self.last_px = px
         self.last_py = py
@@ -98,6 +105,8 @@ class OSController:
 
         if action_name == "left_click":
             return self.left_click(px, py)
+        elif action_name == "right_click":
+            return self.right_click(px, py)
         elif action_name == "scroll_toggle":
             self.scroll_mode_active = not self.scroll_mode_active
             return True
@@ -122,6 +131,27 @@ class OSController:
             try:
                 _pynput_mouse.position = (px, py)
                 _pynput_mouse.click(Button.left, 1)
+                return True
+            except Exception:
+                pass
+        return False
+
+    def right_click(self, px: int, py: int) -> bool:
+        """Execute a single right mouse click at given pixel coordinates."""
+        if self.simulate:
+            return True
+
+        if HAS_WIN32:
+            try:
+                win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTDOWN, px, py, 0, 0)
+                win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP, px, py, 0, 0)
+                return True
+            except Exception:
+                pass
+        if HAS_PYNPUT:
+            try:
+                _pynput_mouse.position = (px, py)
+                _pynput_mouse.click(Button.right, 1)
                 return True
             except Exception:
                 pass

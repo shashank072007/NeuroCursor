@@ -249,6 +249,7 @@ class LiveFrameSource(FrameSource):
         self.frame_q = frame_q if frame_q is not None else queue.Queue(maxsize=FRAME_Q_MAX)
         self.camera_index = camera_index
         self.use_mock = use_mock
+        self.control_q: Optional[queue.Queue] = None
         self.producer = None
         self.running = False
 
@@ -261,6 +262,7 @@ class LiveFrameSource(FrameSource):
                 queue_size=FRAME_Q_MAX,
                 use_mock=self.use_mock
             )
+            self.producer.control_q = self.control_q
             # Route frames directly into our shared queue
             self.producer.frame_queue = self.frame_q
             self.producer.start()

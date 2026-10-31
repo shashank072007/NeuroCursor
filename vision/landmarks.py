@@ -118,6 +118,7 @@ class FaceMeshExtractor:
         self.quality_threshold = quality_threshold
         self._landmarker = None
         self._legacy_mesh = None
+        self._last_video_timestamp_ms = 0
 
         if not MEDIAPIPE_AVAILABLE:
             return
@@ -133,7 +134,9 @@ class FaceMeshExtractor:
                 base_options = mp_base_opt.BaseOptions(model_asset_path=model_path)
                 options = mp_vision.FaceLandmarkerOptions(
                     base_options=base_options,
-                    running_mode=mp_vision.RunningMode.IMAGE,
+                    # VIDEO mode reuses temporal tracking between camera frames and
+                    # avoids full image-mode detection work on every frame.
+                    running_mode=mp_vision.RunningMode.VIDEO,
                     num_faces=1,
                     min_face_detection_confidence=min_detection_confidence,
                     min_face_presence_confidence=min_tracking_confidence,
@@ -174,7 +177,9 @@ class FaceMeshExtractor:
             if self._landmarker is not None:
                 # Tasks API
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-                result = self._landmarker.detect(mp_image)
+                timestamp_ms = max(self._last_video_timestamp_ms + 1, int(time.monotonic() * 1000))
+                self._last_video_timestamp_ms = timestamp_ms
+                result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
 
                 if not result.face_landmarks:
                     process_ms = (time.perf_counter() - start_time) * 1000.0

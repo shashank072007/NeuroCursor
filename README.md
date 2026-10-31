@@ -35,10 +35,10 @@
                      │ SSE Stream / REST API │ (Port 5000)
                      ▼                       ▼
       ┌─────────────────────────────┐ ┌─────────────────────────────┐
-      │     DESKTOP OS CURSOR       │ │    FRONTEND UI (`frontend/`)│
-      │  Native Windows OS Clicks   │ │  • Real-time HUD & Dwell Ring│
+                     │     DESKTOP OS CURSOR       │ │    FRONTEND UI (`frontend/`)│
+      │  Native Windows OS Clicks   │ │  • Real-time HUD & Cursor    │
       │  & Coordinated Movement     │ │  • Voice-Interactive Engine │
-      └─────────────────────────────┘ │  • In-Browser MediaPipe Fallback│
+      └─────────────────────────────┘ │  • Python SSE / MJPEG Client  │
                                       └─────────────────────────────┘
 ```
 
@@ -46,11 +46,11 @@
 
 ## 2. Directory Structure
 
-- **`frontend/`**: The web application suite. High-contrast glassmorphic UI, voice command engine ("Hey Cursor"), in-browser MediaPipe FaceMesh fallback, and live SSE telemetry receiver.
+- **`frontend/`**: The web application suite. High-contrast UI, voice command engine ("Hey Cursor"), Flask SSE telemetry client, and Python-served MJPEG preview. It does not open the webcam or run a landmark model.
 - **`backend/`**: Central controller and Flask REST/SSE server. Hosts `bus.py`, `processor.py`, `intent_guard.py`, `effort.py`, `adapt.py`, `channels.py`, `os_control.py`, and `safety.py`.
 - **`vision/`**: Vision subsystem modules. Standard RGB camera acquisition (`camera.py`), landmark extraction (`landmarks.py`), pointer tracking (`tracking.py`), facial expression debounce (`gestures.py`), calibration manager (`calibration.py`), and threaded producer (`producer.py`).
 - **`models/`**: MediaPipe model asset (`face_landmarker.task`).
-- **`tests/`**: Unified test suite containing 48 unit, contract, and integration tests across all subsystems.
+- **`tests/`**: Unit, contract, and integration tests across all subsystems.
 - **`main.py` / `run.py`**: Unified multi-mode application launcher.
 - **`simulator.py`**: QA chaos injection simulator for jitter, range loss, occlusion, and expression spikes.
 - **`main_debug.py`**: OpenCV live HUD visualizer for tuning and debugging landmarks.
@@ -72,12 +72,9 @@ pip install -r requirements.txt
 #### Option A: Unified Live Mode (Recommended)
 Launches the Flask backend, captures webcam frames with OpenCV + MediaPipe Tasks, activates IntentGuard OS mouse control, and serves the frontend:
 ```bash
-python main.py --open-browser
+python main.py --source live --camera-index 0 --simulate --open-browser
 ```
-Or simply:
-```bash
-python run.py
-```
+The command above uses OS simulation for a safe first run. When tracking is calibrated and you want native OS mouse input, restart without `--simulate`.
 * **Web UI:** Open `http://127.0.0.1:5000/` in Chrome, Edge, or Brave.
 * **SSE Telemetry:** `http://127.0.0.1:5000/stream?token=dev-token`
 
@@ -95,12 +92,8 @@ python main.py --debug-vision
 python main_debug.py
 ```
 
-#### Option D: Standalone Frontend
-You can also run the frontend independently using any static web server:
-```bash
-cd frontend
-python -m http.server 5173
-```
+#### Option D: Frontend-only Preview
+The static UI can be served independently for visual review, but head tracking, camera preview, calibration, and OS controls require the integrated Python app in Option A.
 
 ---
 
@@ -110,14 +103,22 @@ python -m http.server 5173
 |---|---|---|
 | **F9** | Backend Safety | Toggle **Pause / Resume** (pointer tracks, clicks disabled) |
 | **F10** | Backend Safety | Toggle **Lock / Unlock** (cursor and clicks disabled) |
-| **Smile** | Vision / Guard | Left Click / Primary Option Selection (debounced 550ms) |
-| **Mouth Open** | Vision / Guard | Context Action / Right Click Trigger |
+| **Smile** | Vision / Guard | Left Click after a sustained, still, confident gesture |
+| **Dwell circle** | Frontend | A steady hover fills the green circle and performs one left click on completion; move away to rearm |
+| **Mouth Open** | Vision / Guard | Right Click after a sustained, still, confident gesture |
+| **Left Wink** | Vision / Guard | Left Click after a deliberate wink hold |
+| **Right Wink** | Vision / Guard | Right Click after a deliberate wink hold |
 | **Eyebrows Raise**| Vision / Frontend | Hands-free cursor pause / resume toggle |
-| **Dwell Hover** | Frontend Engine | Anchor-based 38px radius hands-free click with radial progress ring |
+| **Both Eyes Blink** | Vision | Suppressed as a natural blink; it does not click |
 | **"Hey Cursor"** | Frontend Voice | Activates voice-directed smooth navigation |
 | **"Click [Option]"**| Frontend Voice | Directly targets and activates interactive UI controls |
+| **"Move cursor left/right/up/down"** | Frontend Voice | Moves the browser cursor in small steps; repeat or say “move cursor far left” for a larger step |
+| **Control mode selector** | Frontend / Backend | Choose Head + gestures, Speech cursor, Physical mouse, or Head + speech |
+| **Priority selector** | Frontend / Backend | In Hybrid mode, choose Head or Speech priority; speech priority temporarily suspends head actions while the voice cursor is awake |
 | **Flip / Mirror** | Frontend Vision | Quick toggle between standard (non-inverted) & mirrored webcam feed |
 | **OS Mouse Toggle** | Frontend / API | Switches OS native cursor control via `/resume` and `/pause` |
+
+Gesture clicks require about 150-260ms of hold depending on the adaptive effort level, adequate face quality, a steady pointer, and a 600ms action cooldown. The wink mapping is asymmetric: left wink clicks left, right wink clicks right.
 
 ---
 
@@ -128,11 +129,10 @@ python -m http.server 5173
    - Quick one-click "Flip / Mirror" and "Invert V" toggles are available directly in the Live Camera HUD and Personalisation settings, persisting preferences to `localStorage`.
    - The landmark mesh overlay dynamically matches CSS transforms for 1:1 face alignment.
 
-2. **Precision Navigation & Anchor-Based Dwell Click:**
+2. **Precision Navigation & Gesture Clicks:**
    - **Asymmetric Gain:** 1.35x vertical scaling compensates for human pitch range vs yaw neck rotation, making top and bottom screen targets effortless to reach.
    - **Fixation Deadzone (0.0035):** Prevents micro-tremors from disturbing button targeting.
    - **Velocity-Adaptive Smoothing:** Automatically provides high responsiveness during sweeping motions and steady low-jitter stability during fixation.
-   - **Anchor Dwell Engine:** Progresses within a 38px anchor circle, eliminating drift-resets.
    - **Interactive Target Resolution:** Ensures clicking inner icons or text spans accurately triggers the parent button or card action.
 
 3. **Optimized Speech-to-Text Conversion:**

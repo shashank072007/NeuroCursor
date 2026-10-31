@@ -180,7 +180,7 @@ def main() -> None:
     camera = CameraManager(camera_index=args.camera, width=args.width, height=args.height)
     if not args.mock:
         if not camera.open():
-            print(f"[WARN] Camera index {args.camera} unavailable. Falling back to --mock mode.")
+            print(f"[WARN] {camera.last_error}. Falling back to --mock mode; live tracking is inactive.")
             args.mock = True
 
     mock_gen = MockFrameGenerator() if args.mock else None

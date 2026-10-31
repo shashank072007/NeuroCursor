@@ -31,6 +31,8 @@ class ProcessorPipeline:
     ):
         self.frame_source = frame_source or MockFrameSource()
         self.control_q = control_q or queue.Queue(maxsize=10)
+        if hasattr(self.frame_source, "control_q"):
+            self.frame_source.control_q = self.control_q
 
         # Wire subsystems
         self.os_controller = os_controller
@@ -40,6 +42,7 @@ class ProcessorPipeline:
         self.intent_guard = IntentGuard(self.os_controller)
         self.effort = EffortMeter()
         self.adapt = AdaptiveEngine(on_vision_params=self._send_vision_params)
+        self.control_mode = "head"
         self.channels = ChannelManager()
         self.calibration = calibration_engine
         self.calibration.control_q = self.control_q
@@ -141,7 +144,7 @@ class ProcessorPipeline:
             # 2. Update pointer if tracking and safety allow
             head = frame.get("head") or frame.get("pointer") or {}
             raw_motion = frame.get("raw_motion") or {}
-            if detected and head and self.safety.can_move_pointer():
+            if detected and head and self.safety.can_move_pointer() and self.control_mode in ("head", "hybrid"):
                 nx = head.get("nx", 0.5)
                 ny = head.get("ny", 0.5)
                 self.os_controller.move_pointer(nx, ny)
@@ -168,7 +171,8 @@ class ProcessorPipeline:
                 profile=profile,
                 paused=self.safety.paused,
                 locked=self.safety.locked,
-                face_lost=self.safety.face_lost
+                face_lost=self.safety.face_lost,
+                control_enabled=self.control_mode in ("head", "hybrid")
             )
 
             if dwell_pending_msg:
@@ -248,12 +252,24 @@ class ProcessorPipeline:
         now = time.time()
         self._last_status_ts = now
         profile = profile_mgr.active_profile
+        source = self.frame_source
+        producer = getattr(source, "producer", None)
+        if producer is None:
+            camera_state = "mock" if isinstance(source, MockFrameSource) else "off"
+        elif producer.use_mock:
+            camera_state = "mock"
+        else:
+            has_recent_frame = (
+                producer.last_success_ts > 0
+                and (time.monotonic() - producer.last_success_ts) < 1.0
+            )
+            camera_state = "on" if producer.camera.is_open and has_recent_frame else "off"
 
         status_msg = make_msg(
             "status",
             paused=self.safety.paused,
             locked=self.safety.locked,
-            camera="on" if not self.safety.face_lost else "off",
+            camera=camera_state,
             mic="off",
             fps=self.fps,
             profile_id=profile.get("profile_id", "demo_profile"),

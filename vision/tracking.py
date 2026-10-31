@@ -114,10 +114,12 @@ class PointerTracker:
     def __init__(
         self,
         profile: Optional[CalibrationProfile] = None,
-        min_cutoff: float = 1.0,
-        beta: float = 0.015,
+        min_cutoff: float = 0.65,
+        beta: float = 0.004,
     ) -> None:
         self.profile = profile or CalibrationProfile()
+        self.manual_gain = 1.0
+        self.adaptive_gain = 1.0
 
         # Independent One Euro Filters for X and Y coordinates
         self.filter_x = OneEuroFilter1D(min_cutoff=min_cutoff, beta=beta)
@@ -126,6 +128,23 @@ class PointerTracker:
     def set_profile(self, profile: CalibrationProfile) -> None:
         self.profile = profile
         self.reset_filters()
+
+    def set_user_sensitivity(self, value: float) -> None:
+        """Set user gain from the UI's 10..100 sensitivity scale."""
+        normalized = float(np.clip((float(value) - 10.0) / 90.0, 0.0, 1.0))
+        self.manual_gain = 0.60 + normalized * 1.50
+
+    def set_adaptation(self, gain: float, smoothing_alpha: float) -> None:
+        """Apply backend adaptation parameters to the Python tracking filters."""
+        new_gain = float(np.clip(gain, 0.75, 1.6))
+        alpha = float(np.clip(smoothing_alpha, 0.08, 0.65))
+        cutoff = (alpha / (1.0 - alpha)) * (30.0 / (2.0 * math.pi))
+        changed = abs(new_gain - self.adaptive_gain) > 0.01 or abs(cutoff - self.filter_x.min_cutoff) > 0.05
+        self.adaptive_gain = new_gain
+        self.filter_x.min_cutoff = cutoff
+        self.filter_y.min_cutoff = cutoff
+        if changed:
+            self.reset_filters()
 
     def reset_filters(self) -> None:
         self.filter_x.reset()
@@ -165,10 +184,12 @@ class PointerTracker:
         # Horizontal mapping
         r_left = max(0.05, self.profile.range_left)
         r_right = max(0.05, self.profile.range_right)
+        # Invert camera-frame X so a user's rightward head movement moves the
+        # cursor right, matching the face-to-screen interaction convention.
         if raw_dx >= 0.0:
-            target_nx = 0.50 + 0.50 * (raw_dx / r_right)
+            target_nx = 0.50 - 0.50 * (raw_dx / r_right)
         else:
-            target_nx = 0.50 - 0.50 * (abs(raw_dx) / r_left)
+            target_nx = 0.50 + 0.50 * (abs(raw_dx) / r_left)
 
         # Vertical mapping
         r_up = max(0.05, self.profile.range_up)
@@ -179,8 +200,9 @@ class PointerTracker:
             target_ny = 0.50 - 0.50 * (abs(raw_dy) / r_up)
 
         # Clamp target before smoothing
-        target_nx = float(np.clip(target_nx, 0.0, 1.0))
-        target_ny = float(np.clip(target_ny, 0.0, 1.0))
+        combined_gain = self.manual_gain * self.adaptive_gain
+        target_nx = float(np.clip(0.5 + (target_nx - 0.5) * combined_gain, 0.0, 1.0))
+        target_ny = float(np.clip(0.5 + (target_ny - 0.5) * combined_gain, 0.0, 1.0))
 
         # 3. Apply One Euro Filter to eliminate jitter
         smoothed_nx = self.filter_x.filter(target_nx, t)

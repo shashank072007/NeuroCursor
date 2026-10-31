@@ -80,7 +80,8 @@ def main():
         source_type=args.source,
         replay_file=args.replay_file,
         simulate_os=args.simulate,
-        camera_index=args.camera_index
+        camera_index=args.camera_index,
+        dev_mode=args.dev
     )
 
     url = f"http://{args.host}:{args.port}"

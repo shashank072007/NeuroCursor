@@ -105,9 +105,9 @@ class AdaptiveEngine:
         effective_level = "fresh" if self.mode == "static" else level
         params = ADAPTATION_TABLE.get(effective_level, ADAPTATION_TABLE["fresh"])
 
-        # Continuous gain = clamp(1 / range_now, 1.0, 1.6)
+        # Continuous gain = clamp(1 / range_now, 1.0, 1.35) — capped to avoid hypersensitive pointing
         r_now = max(0.01, range_now)
-        new_gain = round(max(1.0, min(1.6, 1.0 / r_now)), 2)
+        new_gain = round(max(1.0, min(1.35, 1.0 / r_now)), 2)
 
         # In static mode, lens is disabled and suggest_channel is never sent
         if self.mode == "static":

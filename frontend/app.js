@@ -5,10 +5,13 @@
 const state = {
   page: "dashboard",
   darkMode: false,
-  headMouseEnabled: true,    // Enabled by default for immediate head tracking
+  headMouseEnabled: !["speech", "mouse"].includes(localStorage.getItem("neuro_control_mode") || "head"),
+  controlMode: localStorage.getItem("neuro_control_mode") || "head",
+  controlPriority: localStorage.getItem("neuro_control_priority") || "head",
   cursorPaused: false,        // Eyebrow raise toggle
   voiceListening: false,     // Continuous voice command listener
   voiceCursorActive: false,  // Triggered by "Hey Cursor" wake word
+  voiceError: "",            // Last microphone / recognition error
   isGliding: false,          // Active during smooth voice pointing animations
   osMouseEnabled: false,     // Direct physical Windows operating system cursor control
   cameraActive: false,
@@ -16,7 +19,7 @@ const state = {
   selectedPhrase: "",
   transcriptionText: "",
   isListening: false,
-  sensitivity: 65,           // Slider: 10 - 100
+  sensitivity: 36,           // Slider: 10 - 100 (lower default for precision)
   dwell: 1.2,                // Seconds: 0.5 - 3.5
   sound: true,
   visualReticle: true,
@@ -48,10 +51,6 @@ const state = {
   captureMs: 3.5,
   processMs: 11.0,
   
-  // Calibration baseline anchor
-  neutralNoseX: 0.5,
-  neutralNoseY: 0.45,
-
   // Camera orientation configuration (default false: standard un-inverted view)
   mirrorVideo: localStorage.getItem("neuro_mirror_video") === "true",
   flipVVideo: localStorage.getItem("neuro_flipv_video") === "true",
@@ -114,16 +113,27 @@ function playSound(type = "click") {
 // Text to Speech (Native Web Speech Synthesis)
 function speak(text) {
   if (!text) return;
-  if ("speechSynthesis" in window) {
-    try {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 0.92;
-      utterance.pitch = 1.0;
-      window.speechSynthesis.speak(utterance);
-    } catch (e) {}
-  }
   playSound("success");
+  if (!state.voiceFeedback) return;
+  // Speech synthesis seizes the audio device and kills Chrome SpeechRecognition.
+  // Skip spoken feedback while the command mic is armed so listening stays alive.
+  if (voiceEngineArmed && !state.isListening) return;
+  if (!("speechSynthesis" in window)) return;
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.92;
+    utterance.pitch = 1.0;
+    utterance.onend = resumeVoiceAfterSpeech;
+    utterance.onerror = resumeVoiceAfterSpeech;
+    window.speechSynthesis.speak(utterance);
+  } catch (e) {}
+}
+
+function resumeVoiceAfterSpeech() {
+  if (voiceEngineArmed && !state.isListening) {
+    restartVoiceRecognizerSoon(280);
+  }
 }
 
 // Global Navigation
@@ -168,26 +178,25 @@ function toggleDarkMode() {
   if (window.lucide) window.lucide.createIcons();
 }
 
-// =============================================================
-// CAMERA & MEDIAPIPE FACE MESH HEAD TRACKING
-// =============================================================
-let faceMeshInstance = null;
-let cameraHelper = null;
-let videoElement = null;
-
 // Dwell selection kinematics & Gesture debouncing
 let lastCursorX = 0;
 let lastCursorY = 0;
-let dwellAnchorX = 0;
-let dwellAnchorY = 0;
+let dwellAnchorX = null;
+let dwellAnchorY = null;
 let dwellTimeAccumulated = 0;
-const DWELL_RADIUS_THRESHOLD = 38; // Pixels (tolerance for comfortable resting fixation)
+let dwellSpent = false;
 let lastFrameTime = performance.now();
+let lastSyntheticClickAt = 0;
+const DWELL_RADIUS_THRESHOLD = 38;
 let lastGestureClickTime = 0;
-let lastDwellClickTime = 0;
 let lastEyebrowToggleTime = 0;
-let globalStream = null;
 let gestureToastTimer = null;
+let voiceEngineArmed = false;
+let voiceCommandRecognizer = null;
+let voiceGlideAnimationId = null;
+let voiceActiveTimeout = null;
+let voiceRestartTimer = null;
+let voiceStartInFlight = false;
 
 // Floating Gesture Notification Toast
 function showGestureToast(msg) {
@@ -203,7 +212,14 @@ function showGestureToast(msg) {
 
 // Master In-Browser Head Mouse Toggle
 async function toggleHeadMouseControl() {
-  state.headMouseEnabled = !state.headMouseEnabled;
+  await setControlMode(state.headMouseEnabled ? "mouse" : "head");
+}
+
+async function setControlMode(mode) {
+  if (!["head", "speech", "mouse", "hybrid"].includes(mode)) return;
+  state.controlMode = mode;
+  state.headMouseEnabled = mode === "head" || mode === "hybrid";
+  try { localStorage.setItem("neuro_control_mode", mode); } catch (e) {}
   playSound(state.headMouseEnabled ? "success" : "click");
   
   const cursor = document.getElementById("global-head-cursor");
@@ -213,24 +229,53 @@ async function toggleHeadMouseControl() {
   if (state.headMouseEnabled) {
     if (cursor) cursor.classList.add("active");
     if (btn) btn.classList.add("active");
-    if (text) text.textContent = "Head Mouse: ON";
-    
-    if (!state.cameraActive) {
-      await startCameraVision();
-    }
+    if (text) text.textContent = mode === "hybrid" ? "Hybrid: ON" : "Head Mouse: ON";
+    if (!backendConnected) await startCameraVision();
   } else {
     if (cursor) cursor.classList.remove("active");
     if (btn) btn.classList.remove("active");
-    if (text) text.textContent = "Head Mouse: OFF";
+    if (text) text.textContent = mode === "speech" ? "Speech Cursor" : "Physical Mouse";
   }
+  const modeSelect = document.getElementById("control-mode-select");
+  if (modeSelect) modeSelect.value = mode;
+  const prioritySelect = document.getElementById("control-priority-select");
+  if (prioritySelect) prioritySelect.disabled = mode !== "hybrid";
+  syncBackendControlMode();
+  resetDwellSelection();
+  renderView();
+}
+
+function resetDwellSelection() {
+  dwellAnchorX = null;
+  dwellAnchorY = null;
+  dwellTimeAccumulated = 0;
+  dwellSpent = false;
+  const ring = document.getElementById("dwell-progress-bar");
+  if (ring) ring.style.strokeDashoffset = 157;
+}
+
+function setControlPriority(priority) {
+  if (!["head", "speech"].includes(priority)) return;
+  state.controlPriority = priority;
+  try { localStorage.setItem("neuro_control_priority", priority); } catch (e) {}
+  const select = document.getElementById("control-priority-select");
+  if (select) select.value = priority;
+  if (state.controlMode !== "hybrid") return;
+  syncBackendControlMode();
+  showGestureToast(`Cursor priority: ${priority}`);
+}
+
+function syncBackendControlMode() {
+  const speechOwns = state.controlMode === "hybrid" && state.controlPriority === "speech" && state.voiceCursorActive;
+  callBackend("/control-mode", { mode: speechOwns ? "speech" : state.controlMode });
 }
 
 
 // -------------------------------------------------------------
 // FLUX BACKEND INTEGRATION & SSE STREAM
 // -------------------------------------------------------------
-const BACKEND_URL = (window.location.protocol === "http:" || window.location.protocol === "https:") && window.location.port
-  ? `${window.location.protocol}//${window.location.hostname}:5000`
+const BACKEND_URL = (window.location.protocol === "http:" || window.location.protocol === "https:")
+  ? window.location.origin
   : "http://127.0.0.1:5000";
 const FLUX_TOKEN = "dev-token";
 let backendSSE = null;
@@ -245,7 +290,11 @@ function initBackendConnection() {
       backendConnected = true;
       console.log("[NeuroCursor] Connected to FLUX backend SSE stream at", streamUrl);
       const statusEl = document.getElementById("pip-status-label");
-      if (statusEl) statusEl.textContent = "Backend Linked";
+      if (statusEl) statusEl.textContent = "Python Vision Linked";
+      syncWebcamVideoStreams();
+      const statusText = document.getElementById("system-status-text");
+      if (statusText) statusText.textContent = "Vision: Connected to Python";
+      callBackend("/vision/sensitivity", { value: state.sensitivity });
     };
 
     backendSSE.onmessage = (event) => {
@@ -259,12 +308,15 @@ function initBackendConnection() {
 
     backendSSE.onerror = () => {
       if (backendConnected) {
-        console.warn("[NeuroCursor] Backend stream disconnected. Using standalone in-browser mode.");
+        console.warn("[NeuroCursor] Python vision stream disconnected.");
         backendConnected = false;
+        state.cameraActive = false;
+        state.trackingDetected = false;
+        syncWebcamVideoStreams();
       }
     };
   } catch (e) {
-    console.log("[NeuroCursor] Running in standalone frontend mode:", e);
+    console.warn("[NeuroCursor] Python backend unavailable; integrated tracking is disabled:", e);
   }
 }
 
@@ -272,6 +324,17 @@ function handleBackendMessage(msg) {
   if (!msg || !msg.type) return;
 
   if (msg.type === "frame") {
+    if (msg.face && Number.isFinite(msg.face.quality)) state.faceQuality = Number(msg.face.quality);
+    if (msg.camera && Number.isFinite(msg.camera.brightness)) state.cameraBrightness = Number(msg.camera.brightness);
+    if (msg.camera && typeof msg.camera.connected === "boolean" && msg.camera.connected !== state.cameraActive) {
+      state.cameraActive = msg.camera.connected;
+      syncWebcamVideoStreams();
+      const pipLabel = document.getElementById("pip-status-label");
+      const statusText = document.getElementById("system-status-text");
+      const label = state.cameraActive ? "Python Vision Live" : "Python Camera Offline";
+      if (pipLabel) pipLabel.textContent = label;
+      if (statusText) statusText.textContent = `Vision: ${label}`;
+    }
     const head = msg.head || msg.pointer;
     if (head && msg.detected) {
       const nx = head.nx !== undefined ? head.nx : 0.5;
@@ -282,22 +345,41 @@ function handleBackendMessage(msg) {
       state.trackingDetected = true;
     } else {
       state.trackingDetected = false;
+      state.gestureName = "none";
+      state.gestureScore = 0;
+      const gestureLabel = document.getElementById("active-gesture-display");
+      if (gestureLabel) gestureLabel.textContent = "None (Neutral)";
+      resetDwellSelection();
     }
     if (msg.timing && msg.timing.fps) {
       state.fps = msg.timing.fps;
     }
+    if (msg.timing) {
+      state.captureMs = Number(msg.timing.capture_ms || 0);
+      state.processMs = Number(msg.timing.process_ms || 0);
+    }
+    if (msg.face && Number.isFinite(msg.face.quality)) state.faceQuality = msg.face.quality;
+    if (msg.camera && Number.isFinite(msg.camera.brightness)) state.cameraBrightness = msg.camera.brightness;
   } else if (msg.type === "status") {
     state.cursorPaused = !!msg.paused;
     if (msg.locked !== undefined) state.locked = msg.locked;
+    state.cameraActive = msg.camera === "on";
+    const pipLabel = document.getElementById("pip-status-label");
+    const statusText = document.getElementById("system-status-text");
+    const label = state.cameraActive ? "Python Vision Live" : msg.camera === "mock" ? "Python Vision: Mock Source" : "Python Camera Offline";
+    if (pipLabel) pipLabel.textContent = label;
+    if (statusText) statusText.textContent = `Vision: ${label}`;
+    syncWebcamVideoStreams();
+    if (Number.isFinite(msg.fps)) state.fps = msg.fps;
   } else if (msg.type === "action") {
     if (msg.action === "left_click" || msg.action === "click") {
-      const scrX = (msg.nx || state.smoothNx) * window.innerWidth;
-      const scrY = (msg.ny || state.smoothNy) * window.innerHeight;
-      executeClickAt(scrX, scrY, "left", "Backend Gesture");
+      const scrX = (msg.nx ?? state.smoothNx) * window.innerWidth;
+      const scrY = (msg.ny ?? state.smoothNy) * window.innerHeight;
+      if (["head", "hybrid"].includes(state.controlMode)) executeClickAt(scrX, scrY, "left", "Backend Gesture");
     } else if (msg.action === "right_click") {
-      const scrX = (msg.nx || state.smoothNx) * window.innerWidth;
-      const scrY = (msg.ny || state.smoothNy) * window.innerHeight;
-      executeClickAt(scrX, scrY, "right", "Backend Gesture");
+      const scrX = (msg.nx ?? state.smoothNx) * window.innerWidth;
+      const scrY = (msg.ny ?? state.smoothNy) * window.innerHeight;
+      if (["head", "hybrid"].includes(state.controlMode)) executeClickAt(scrX, scrY, "right", "Backend Gesture");
     }
   } else if (msg.type === "ui_state") {
     if (msg.dwell_ms) {
@@ -339,21 +421,17 @@ function toggleOSMouseControl() {
 }
 
 
-// Apply horizontal mirror & vertical inversion transforms to video feeds & mesh canvas
+// Webcam preview is relayed from Python's capture worker over MJPEG.
+// The browser never opens a camera device or runs a landmark model.
 function applyWebcamTransforms() {
-  const targets = [
+  [
     document.getElementById("live-webcam-element"),
-    document.getElementById("vision-canvas"),
     document.getElementById("persistent-webcam"),
     document.getElementById("pip-camera-container")
-  ];
-  targets.forEach(el => {
+  ].forEach(el => {
     if (!el) return;
-    if (state.mirrorVideo) el.classList.add("mirrored");
-    else el.classList.remove("mirrored");
-
-    if (state.flipVVideo) el.classList.add("flipped-v");
-    else el.classList.remove("flipped-v");
+    el.classList.toggle("mirrored", !!state.mirrorVideo);
+    el.classList.toggle("flipped-v", !!state.flipVVideo);
   });
 }
 
@@ -362,7 +440,7 @@ function toggleWebcamMirror() {
   try { localStorage.setItem("neuro_mirror_video", state.mirrorVideo ? "true" : "false"); } catch (e) {}
   applyWebcamTransforms();
   playSound("click");
-  showGestureToast(state.mirrorVideo ? "Webcam Mirrored (Flip Horizontal)" : "Webcam Standard (Non-Inverted)");
+  showGestureToast(state.mirrorVideo ? "Preview mirrored" : "Preview standard orientation");
   renderView();
 }
 
@@ -371,347 +449,133 @@ function toggleWebcamFlipV() {
   try { localStorage.setItem("neuro_flipv_video", state.flipVVideo ? "true" : "false"); } catch (e) {}
   applyWebcamTransforms();
   playSound("click");
-  showGestureToast(state.flipVVideo ? "Webcam Inverted Vertically" : "Webcam Standard Vertical");
+  showGestureToast(state.flipVVideo ? "Preview flipped vertically" : "Preview standard orientation");
   renderView();
 }
 
-// Synchronize webcam video element and PiP stream
 function syncWebcamVideoStreams() {
-  const visibleVid = document.getElementById("live-webcam-element");
-  const pipVid = document.getElementById("persistent-webcam");
-
-  if (globalStream && globalStream.active) {
-    if (visibleVid && visibleVid.srcObject !== globalStream) {
-      visibleVid.srcObject = globalStream;
-      visibleVid.style.display = "block";
-      visibleVid.play().catch(() => {});
-    }
-    if (pipVid && pipVid.srcObject !== globalStream) {
-      pipVid.srcObject = globalStream;
-      pipVid.style.display = "block";
-      pipVid.play().catch(() => {});
-    }
-  }
+  const previewUrl = backendConnected && state.cameraActive
+    ? `${BACKEND_URL}/camera/stream?token=${encodeURIComponent(FLUX_TOKEN)}`
+    : "";
+  [document.getElementById("persistent-webcam"), document.getElementById("live-webcam-element")].forEach(img => {
+    if (!img) return;
+    if (previewUrl && img.src !== previewUrl) img.src = previewUrl;
+    if (!previewUrl && img.hasAttribute("src")) img.removeAttribute("src");
+  });
   applyWebcamTransforms();
 }
 
-// Initialize Camera & MediaPipe FaceMesh
 async function startCameraVision() {
-  if (state.cameraActive && globalStream) return;
-
-  const statusText = document.getElementById("system-status-text");
-  if (statusText) statusText.textContent = "Vision: Connecting...";
-
-  try {
-    if (window.FaceMesh) {
-      faceMeshInstance = new window.FaceMesh({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
-      });
-
-      faceMeshInstance.setOptions({
-        maxNumFaces: 1,
-        refineLandmarks: true,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5
-      });
-
-      faceMeshInstance.onResults(onFaceMeshResults);
-    }
-
-    videoElement = document.getElementById("persistent-webcam") || document.getElementById("live-webcam-element");
-    if (!videoElement) {
-      videoElement = document.createElement("video");
-      videoElement.id = "live-webcam-element";
-      videoElement.autoplay = true;
-      videoElement.playsInline = true;
-      videoElement.muted = true;
-      videoElement.style.display = "none";
-      document.body.appendChild(videoElement);
-    }
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480, facingMode: "user" }
-    });
-
-    globalStream = stream;
-    videoElement.srcObject = stream;
-    await videoElement.play();
-    state.cameraActive = true;
-
-    syncWebcamVideoStreams();
-
-    if (window.Camera && faceMeshInstance) {
-      cameraHelper = new window.Camera(videoElement, {
-        onFrame: async () => {
-          if (state.cameraActive && faceMeshInstance) {
-            await faceMeshInstance.send({ image: videoElement });
-          }
-        },
-        width: 640,
-        height: 480
-      });
-      cameraHelper.start();
-    } else {
-      async function manualFrameLoop() {
-        if (state.cameraActive) {
-          if (faceMeshInstance && videoElement.readyState >= 2) {
-            await faceMeshInstance.send({ image: videoElement });
-          }
-          requestAnimationFrame(manualFrameLoop);
-        }
-      }
-      manualFrameLoop();
-    }
-
-    if (statusText) statusText.textContent = "Vision: Active (30 FPS)";
-    const dot = document.getElementById("status-dot-indicator");
-    if (dot) dot.style.background = "var(--mint-teal)";
-
-    playSound("success");
-    renderView();
-
-  } catch (err) {
-    console.warn("[NeuroCursor] Web camera local capture request:", err);
-    state.cameraActive = false;
-    const statusText = document.getElementById("system-status-text");
-    if (statusText) statusText.textContent = "Vision: Camera Standby";
-    renderView();
+  if (!backendSSE) initBackendConnection();
+  syncWebcamVideoStreams();
+  if (!backendConnected) {
+    showGestureToast("Start the Python app to connect its camera and tracking stream.");
+    return;
   }
+  showGestureToast(state.cameraActive ? "Python vision is live." : "Waiting for Python camera status…");
 }
 
-// Stop Camera
 function stopCameraVision() {
-  if (globalStream) {
-    globalStream.getTracks().forEach(t => t.stop());
-    globalStream = null;
-  }
-  if (videoElement && videoElement.srcObject) {
-    videoElement.srcObject = null;
-  }
-  if (cameraHelper) {
-    cameraHelper.stop();
-    cameraHelper = null;
-  }
-  state.cameraActive = false;
+  state.headMouseEnabled = false;
   state.trackingDetected = false;
-
-  const statusText = document.getElementById("system-status-text");
-  if (statusText) statusText.textContent = "Vision: Standby";
-
-  playSound("click");
+  callBackend("/pause");
+  const cursor = document.getElementById("global-head-cursor");
+  if (cursor) cursor.classList.remove("active");
+  showGestureToast("Cursor paused. Python camera stays available to the integrated app.");
   renderView();
 }
 
-// =============================================================
-// FACE MESH KINEMATICS & GESTURE PROCESSING
-// =============================================================
-function onFaceMeshResults(results) {
-  if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
-    state.trackingDetected = false;
-    return;
+// Coordinates arrive normalized and already calibrated/filtered by Python.
+let lastObservedGesture = "none";
+let calibrationPreviousPause = false;
+function updateTrackingKinematics(targetNx, targetNy, gesture = "none", score = 0) {
+  state.rawNx = Number(targetNx);
+  state.rawNy = Number(targetNy);
+  state.gestureName = gesture || "none";
+  state.gestureScore = Number(score) || 0;
+  const gestureLabel = document.getElementById("active-gesture-display");
+  if (gestureLabel) {
+    gestureLabel.textContent = state.gestureName === "none"
+      ? "None (Neutral)"
+      : `${state.gestureName.toUpperCase()} · ${Math.round(state.gestureScore * 100)}%`;
   }
 
-  state.trackingDetected = true;
-  const landmarks = results.multiFaceLandmarks[0];
+  // Toggle on an activation edge, never repeatedly while the expression is held.
+  if (!state.calibrating && state.gestureName === "brow_raise" && lastObservedGesture !== "brow_raise" && state.gestureScore >= 0.55) {
+    state.cursorPaused = !state.cursorPaused;
+    callBackend(state.cursorPaused ? "/pause" : "/resume");
+    const cursor = document.getElementById("global-head-cursor");
+    if (cursor) cursor.classList.toggle("paused", state.cursorPaused);
+    showGestureToast(state.cursorPaused ? "Cursor paused" : "Cursor resumed");
+  }
+  lastObservedGesture = state.gestureName;
 
-  const noseTip = landmarks[4];       // Primary tracking anchor
-  const topLip = landmarks[13];
-  const bottomLip = landmarks[14];
-  const chin = landmarks[152];
-  const forehead = landmarks[10];
-  const leftMouth = landmarks[61];
-  const rightMouth = landmarks[291];
-  const leftEye = landmarks[33];
-  const rightEye = landmarks[263];
-  const leftEyebrow = landmarks[70];
-  const rightEyebrow = landmarks[300];
-  const leftEyeUpper = landmarks[159];
-  const rightEyeUpper = landmarks[386];
-
-  // Head Movement Offsets (relative to calibrated neutral center)
-  const dx = (noseTip.x - state.neutralNoseX);
-  const dy = (noseTip.y - state.neutralNoseY);
-
-  state.rawDx = dx;
-  state.rawDy = dy;
-
-  // Ergonomic deadzone filters involuntary micro-tremors without sticking
-  const deadzone = 0.0035;
-  const absDx = Math.abs(dx);
-  const absDy = Math.abs(dy);
-  const effDx = absDx > deadzone ? Math.sign(dx) * Math.pow((absDx - deadzone) / (1.0 - deadzone), 0.92) : 0;
-  const effDy = absDy > deadzone ? Math.sign(dy) * Math.pow((absDy - deadzone) / (1.0 - deadzone), 0.92) : 0;
-
-  // Asymmetric gain scaling: human neck pitch has ~35% smaller physical range than yaw rotation
-  const gainX = 2.4 + (state.sensitivity / 100.0) * 4.6;
-  const gainY = gainX * 1.35;
-
-  const rawNx = Math.max(0.01, Math.min(0.99, 0.5 - (effDx * gainX)));
-  const rawNy = Math.max(0.01, Math.min(0.99, 0.5 + (effDy * gainY)));
-
-  // Gesture Detection & Natural Expression Scoring
-  let detectedGesture = "none";
-  let gestureScore = 0.0;
-
-  const faceHeight = Math.hypot(chin.x - forehead.x, chin.y - forehead.y) || 0.001;
-  const lipDist = Math.hypot(topLip.x - bottomLip.x, topLip.y - bottomLip.y);
-  const mouthOpenRatio = lipDist / faceHeight;
-
-  const eyeDist = Math.hypot(leftEye.x - rightEye.x, leftEye.y - rightEye.y) || 0.001;
-  const mouthWidth = Math.hypot(leftMouth.x - rightMouth.x, leftMouth.y - rightMouth.y);
-  const smileRatio = mouthWidth / eyeDist;
-
-  // Mouth corner elevation to capture natural, comfortable smiles
-  const mouthCenterY = (topLip.y + bottomLip.y) / 2.0;
-  const cornerElevation = ((mouthCenterY - leftMouth.y) + (mouthCenterY - rightMouth.y)) / (2.0 * faceHeight);
-
-  const browDist = ((leftEyeUpper.y - leftEyebrow.y) + (rightEyeUpper.y - rightEyebrow.y)) / 2.0;
-  const browRatio = browDist / faceHeight;
-
-  // Fine-tuned thresholds for natural interaction without muscular strain:
-  if (browRatio > 0.098) {
-    detectedGesture = "eyebrow_raise";
-    gestureScore = Math.min(1.0, (browRatio - 0.098) / 0.04 + 0.65);
-  } else if (smileRatio > 0.80 || (smileRatio > 0.77 && cornerElevation > 0.012)) {
-    detectedGesture = "smile";
-    gestureScore = Math.min(1.0, (smileRatio - 0.77) / 0.12 + 0.65);
-  } else if (mouthOpenRatio > 0.11) {
-    detectedGesture = "mouth_open";
-    gestureScore = Math.min(1.0, (mouthOpenRatio - 0.11) / 0.10 + 0.60);
+  const cursor = document.getElementById("global-head-cursor");
+  const speechOwnsCursor = (state.controlMode === "speech" && (state.voiceCursorActive || state.isGliding)) ||
+    (state.controlMode === "mouse" && (state.voiceCursorActive || state.isGliding)) ||
+    (state.controlMode === "hybrid" && state.controlPriority === "speech" && (state.voiceCursorActive || state.isGliding));
+  if (!speechOwnsCursor) {
+    state.smoothNx = Math.max(0, Math.min(1, state.rawNx));
+    state.smoothNy = Math.max(0, Math.min(1, state.rawNy));
+  }
+  const x = state.smoothNx * window.innerWidth;
+  const y = state.smoothNy * window.innerHeight;
+  if (cursor && state.headMouseEnabled && !state.cursorPaused && !speechOwnsCursor) {
+    cursor.style.left = `${x}px`;
+    cursor.style.top = `${y}px`;
   }
 
-  updateTrackingKinematics(rawNx, rawNy, detectedGesture, gestureScore);
-  drawVisionLandmarkMesh(landmarks);
-}
-
-// Update Global Cursor Position, Dwell Clicker & Smoothing
-function updateTrackingKinematics(targetNx, targetNy, gesture, score) {
-  // If cursor is actively gliding to a voice target, do not overwrite coordinates
-  if (state.isGliding) return;
-
-  state.rawNx = targetNx;
-  state.rawNy = targetNy;
-  state.gestureName = gesture;
-  state.gestureScore = score;
+  const reticle = document.getElementById("active-reticle");
+  const zone = document.getElementById("cursor-test-zone");
+  if (reticle && zone) {
+    const rect = zone.getBoundingClientRect();
+    reticle.style.left = `${state.smoothNx * rect.width}px`;
+    reticle.style.top = `${state.smoothNy * rect.height}px`;
+  }
+  if (state.page === "studio" && state.headMouseEnabled && !state.cursorPaused && !speechOwnsCursor) {
+    handleHeadStudioDrawing(x, y);
+  }
 
   const now = performance.now();
-
-  // 1. Eyebrow Raise -> Toggle Pause/Disable Cursor
-  if (gesture === "eyebrow_raise" && score > 0.65 && (now - lastEyebrowToggleTime > 1200)) {
-    state.cursorPaused = !state.cursorPaused;
-    lastEyebrowToggleTime = now;
-    playSound(state.cursorPaused ? "alert" : "success");
-    showGestureToast(state.cursorPaused ? "⏸️ CURSOR PAUSED (Eyebrows Raised)" : "▶️ CURSOR ACTIVE (Eyebrows Raised)");
-
-    const globalCursor = document.getElementById("global-head-cursor");
-    if (globalCursor) {
-      if (state.cursorPaused) globalCursor.classList.add("paused");
-      else globalCursor.classList.remove("paused");
-    }
-  }
-
-  // If cursor is paused, do not update position or trigger clicks
-  if (state.cursorPaused) {
-    const globalCursor = document.getElementById("global-head-cursor");
-    if (globalCursor) globalCursor.classList.add("paused");
-    return;
-  } else {
-    const globalCursor = document.getElementById("global-head-cursor");
-    if (globalCursor) globalCursor.classList.remove("paused");
-  }
-
-  // If cursor is smoothly gliding toward a voice target, do not overwrite coordinates
-  if (state.isGliding) {
-    return;
-  }
-
-  // Velocity-adaptive low-pass smoothing:
-  // Higher alpha during fast head motion for instant response; lower alpha during fixation for zero-jitter aiming
-  const moveDist = Math.hypot(targetNx - state.smoothNx, targetNy - state.smoothNy);
-  const alpha = moveDist > 0.015 ? 0.36 + (state.sensitivity / 100) * 0.18 : 0.18 + (state.sensitivity / 100) * 0.10;
-  state.smoothNx = state.smoothNx * (1 - alpha) + targetNx * alpha;
-  state.smoothNy = state.smoothNy * (1 - alpha) + targetNy * alpha;
-
-  const screenX = state.smoothNx * window.innerWidth;
-  const screenY = state.smoothNy * window.innerHeight;
-
-  // 2. Move Global Floating Head Cursor
-  const globalCursor = document.getElementById("global-head-cursor");
-  if (globalCursor && state.headMouseEnabled) {
-    globalCursor.style.left = `${screenX}px`;
-    globalCursor.style.top = `${screenY}px`;
-  }
-
-  // 3. Synchronize the Demonstration Reticle in Live Control tab
-  const activeReticle = document.getElementById("active-reticle");
-  const testZone = document.getElementById("cursor-test-zone");
-  if (activeReticle && testZone) {
-    const rect = testZone.getBoundingClientRect();
-    const zoneX = state.smoothNx * rect.width;
-    const zoneY = state.smoothNy * rect.height;
-    activeReticle.style.left = `${zoneX}px`;
-    activeReticle.style.top = `${zoneY}px`;
-  }
-
-  // 4. Hands-Free Canvas Drawing in Creative Studio
-  if (state.page === "studio" && state.headMouseEnabled) {
-    handleHeadStudioDrawing(screenX, screenY);
-  }
-
-  // 5. Stable Anchor-Based Dwell Selection Engine
-  const dt = Math.min(0.1, (now - lastFrameTime) / 1000.0);
+  const dt = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000));
   lastFrameTime = now;
-
-  const distFromAnchor = Math.hypot(screenX - dwellAnchorX, screenY - dwellAnchorY);
-
-  if (distFromAnchor < DWELL_RADIUS_THRESHOLD) {
-    dwellTimeAccumulated += dt;
-    const progress = Math.min(1.0, dwellTimeAccumulated / state.dwell);
-
-    const bar = document.getElementById("dwell-progress-bar");
-    if (bar) {
-      const circumference = 157;
-      const offset = circumference * (1 - progress);
-      bar.style.strokeDashoffset = offset;
-    }
-
-    if (dwellTimeAccumulated >= state.dwell && (now - lastDwellClickTime > 600)) {
-      executeClickAt(screenX, screenY, "left", "Dwell Selection");
-      lastDwellClickTime = now;
-      dwellTimeAccumulated = 0;
-      dwellAnchorX = screenX;
-      dwellAnchorY = screenY;
-      if (bar) bar.style.strokeDashoffset = 157;
-    }
+  const dwellEnabled = ["head", "hybrid"].includes(state.controlMode) &&
+    state.headMouseEnabled && !state.cursorPaused && !state.calibrating && !speechOwnsCursor;
+  const ring = document.getElementById("dwell-progress-bar");
+  if (!dwellEnabled) {
+    resetDwellSelection();
   } else {
-    // Cursor moved outside dwell target zone: establish new dwell anchor
-    dwellAnchorX = screenX;
-    dwellAnchorY = screenY;
-    dwellTimeAccumulated = 0;
-    const bar = document.getElementById("dwell-progress-bar");
-    if (bar) bar.style.strokeDashoffset = 157;
+    const anchorX = dwellAnchorX === null ? x : dwellAnchorX;
+    const anchorY = dwellAnchorY === null ? y : dwellAnchorY;
+    if (Math.hypot(x - anchorX, y - anchorY) > DWELL_RADIUS_THRESHOLD) {
+      dwellAnchorX = x;
+      dwellAnchorY = y;
+      dwellTimeAccumulated = 0;
+      dwellSpent = false;
+    } else if (dwellAnchorX === null) {
+      dwellAnchorX = x;
+      dwellAnchorY = y;
+      dwellTimeAccumulated = 0;
+      dwellSpent = false;
+    } else if (!dwellSpent) {
+      dwellTimeAccumulated += dt;
+    }
+
+    const dwellTarget = Math.max(0.5, Math.min(3.5, Number(state.dwell) || 1.2));
+    const progress = Math.min(1, dwellTimeAccumulated / dwellTarget);
+    if (ring) ring.style.strokeDashoffset = 157 * (1 - progress);
+    if (!dwellSpent && progress >= 1 && now - lastSyntheticClickAt >= 650) {
+      dwellSpent = true;
+      executeClickAt(x, y, "left", "Dwell Selection");
+    }
   }
 
-  lastCursorX = screenX;
-  lastCursorY = screenY;
-
-  // 6. Facial Gestures Execution (Fine-tuned for responsive clicking of options/buttons)
-  // Smile -> Primary Click / Select Option
-  if (gesture === "smile" && score >= 0.65 && (now - lastGestureClickTime > 550)) {
-    executeClickAt(screenX, screenY, "left", "Smile (Select)");
-    showGestureToast("😊 SMILE: Option Selected");
-    lastGestureClickTime = now;
-  }
-  // Open Mouth -> Secondary Context Click / Options Menu
-  else if (gesture === "mouth_open" && score >= 0.62 && (now - lastGestureClickTime > 550)) {
-    executeClickAt(screenX, screenY, "right", "Mouth Open (Right Click)");
-    showGestureToast("😮 MOUTH OPEN: Context Action");
-    lastGestureClickTime = now;
-  }
 }
 
 // Execute synthetic click on UI element under pointer with intelligent interactive ancestor resolution
 function executeClickAt(x, y, button = "left", source = "Head Cursor") {
+  lastSyntheticClickAt = performance.now();
+  if (source !== "Dwell Selection") dwellSpent = true;
   const globalCursor = document.getElementById("global-head-cursor");
   if (globalCursor) {
     globalCursor.classList.add("clicking");
@@ -731,192 +595,192 @@ function executeClickAt(x, y, button = "left", source = "Head Cursor") {
       target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
       target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
       target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
-      if (typeof target.click === "function") {
-        target.click();
-      }
     } else if (button === "right") {
       target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 2 }));
     }
   }
 
-  triggerGlobalRipple(x, y, button === "right" ? "#F59E0B" : "#24A98A");
   playSound("click");
+  if (source === "Dwell Selection") showGestureToast("Dwell left click");
 
   setTimeout(() => {
     if (globalCursor) globalCursor.classList.remove("clicking");
   }, 220);
 }
 
-// Visual Ripple Animation on Click
-function triggerGlobalRipple(x, y, color = "#24A98A") {
-  const ripple = document.createElement("div");
-  ripple.className = "global-click-ripple";
-  ripple.style.left = `${x}px`;
-  ripple.style.top = `${y}px`;
-  ripple.style.borderColor = color;
-  document.body.appendChild(ripple);
-
-  setTimeout(() => {
-    ripple.remove();
-  }, 600);
-}
-
-// Draw Face Landmarks Mesh onto Live Control Canvas
-function drawVisionLandmarkMesh(landmarks) {
-  const canvas = document.getElementById("vision-canvas");
-  if (!canvas) return;
-
-  const ctx = canvas.getContext("2d");
-  canvas.width = canvas.parentElement.clientWidth;
-  canvas.height = canvas.parentElement.clientHeight;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const w = canvas.width;
-  const h = canvas.height;
-
-  ctx.fillStyle = "#24A98A";
-  ctx.strokeStyle = "rgba(36, 169, 138, 0.4)";
-  ctx.lineWidth = 1;
-
-  const nose = landmarks[4];
-  const nx = nose.x * w;
-  const ny = nose.y * h;
-
-  ctx.beginPath();
-  ctx.arc(nx, ny, 6, 0, Math.PI * 2);
-  ctx.fillStyle = "#4268D5";
-  ctx.fill();
-  ctx.strokeStyle = "#FFFFFF";
-  ctx.stroke();
-
-  [33, 133, 362, 263].forEach(idx => {
-    const pt = landmarks[idx];
-    const px = pt.x * w;
-    const py = pt.y * h;
-    ctx.beginPath();
-    ctx.arc(px, py, 3, 0, Math.PI * 2);
-    ctx.fillStyle = "#24A98A";
-    ctx.fill();
-  });
-
-  ctx.beginPath();
-  [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291].forEach((idx, i) => {
-    const pt = landmarks[idx];
-    const px = pt.x * w;
-    const py = pt.y * h;
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  });
-  ctx.closePath();
-  ctx.strokeStyle = state.gestureName === "mouth_open" ? "#EF4444" : "rgba(36, 169, 138, 0.7)";
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  const pitchEl = document.getElementById("head-pitch-val");
-  if (pitchEl) {
-    pitchEl.textContent = `${state.gestureName !== "none" ? state.gestureName.toUpperCase() : "Active"}`;
-  }
-}
-
 // Neutral Posture Calibration
 function calibrateNeutralPosition() {
-  state.neutralNoseX = state.rawNx || 0.5;
-  state.neutralNoseY = state.rawNy || 0.45;
-  try {
-    localStorage.setItem("neuro_neutral_x", state.neutralNoseX.toString());
-    localStorage.setItem("neuro_neutral_y", state.neutralNoseY.toString());
-  } catch (err) {}
-  playSound("success");
-  showGestureToast("🎯 Neutral posture calibrated! Current position set as center anchor.");
+  callBackend("/vision/recenter").then(result => {
+    if (result.ok) {
+      showGestureToast(result.message || "Python neutral position saved.");
+      playSound("success");
+    } else {
+      showGestureToast(result.error || "Could not recenter. Check Python camera tracking.");
+    }
+  });
 }
 
 // =============================================================
 // VOICE INTERACTIVE CURSOR ENGINE ("HEY CURSOR" + POINTING)
 // =============================================================
-let voiceCommandRecognizer = null;
-let voiceGlideAnimationId = null;
-let voiceActiveTimeout = null;
+function getSpeechRecognitionCtor() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
 
-function initVoiceCommandListener() {
-  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRec) {
-    console.warn("[NeuroCursor] Speech recognition API not supported in this browser.");
-    return;
+function restartVoiceRecognizerSoon(delayMs = 220) {
+  if (voiceRestartTimer) clearTimeout(voiceRestartTimer);
+  voiceRestartTimer = setTimeout(() => {
+    if (!voiceEngineArmed || state.isListening) return;
+    try {
+      if (voiceCommandRecognizer) voiceCommandRecognizer.start();
+      else attachVoiceRecognizer();
+    } catch (e) {
+      attachVoiceRecognizer();
+    }
+  }, delayMs);
+}
+
+function destroyVoiceRecognizer() {
+  if (voiceRestartTimer) {
+    clearTimeout(voiceRestartTimer);
+    voiceRestartTimer = null;
   }
+  if (!voiceCommandRecognizer) return;
+  voiceCommandRecognizer.onstart = null;
+  voiceCommandRecognizer.onend = null;
+  voiceCommandRecognizer.onerror = null;
+  voiceCommandRecognizer.onresult = null;
+  try { voiceCommandRecognizer.abort(); } catch (e) {}
+  voiceCommandRecognizer = null;
+}
 
-  if (voiceCommandRecognizer) {
-    try { voiceCommandRecognizer.stop(); } catch (e) {}
+async function ensureMicrophonePermission() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("Microphone API unavailable");
   }
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true }
+  });
+  // Release the track so SpeechRecognition can own the mic
+  stream.getTracks().forEach((t) => t.stop());
+}
 
-  voiceCommandRecognizer = new SpeechRec();
-  voiceCommandRecognizer.continuous = true;
-  voiceCommandRecognizer.interimResults = true;
-  voiceCommandRecognizer.lang = "en-US";
+function attachVoiceRecognizer() {
+  const SpeechRec = getSpeechRecognitionCtor();
+  if (!SpeechRec) return;
 
-  voiceCommandRecognizer.onstart = () => {
+  destroyVoiceRecognizer();
+  const rec = new SpeechRec();
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.lang = navigator.language || "en-US";
+  rec.maxAlternatives = 3;
+
+  rec.onstart = () => {
     state.voiceListening = true;
+    state.voiceError = "";
     updateVoicePillUI();
-    console.log("[NeuroCursor] Voice command recognition active.");
   };
 
-  voiceCommandRecognizer.onresult = (event) => {
+  rec.onresult = (event) => {
     let transcript = "";
     let isFinal = false;
     for (let i = event.resultIndex; i < event.results.length; ++i) {
       transcript += event.results[i][0].transcript;
       if (event.results[i].isFinal) isFinal = true;
     }
-    transcript = transcript.trim().toLowerCase();
-    if (transcript) {
-      handleVoiceCommandPhrase(transcript, isFinal);
-    }
+    transcript = normalizeVoiceTranscript(transcript);
+    if (transcript) handleVoiceCommandPhrase(transcript, isFinal);
   };
 
-  voiceCommandRecognizer.onerror = (e) => {
-    console.log("[Voice Command Event]", e.error);
-    if (e.error === "not-allowed") {
+  rec.onerror = (e) => {
+    const err = e && e.error ? e.error : "unknown";
+    if (err === "not-allowed" || err === "service-not-allowed") {
+      voiceEngineArmed = false;
       state.voiceListening = false;
+      state.voiceError = "mic-blocked";
+      showGestureToast("Microphone blocked. Allow mic in the browser address bar.");
       updateVoicePillUI();
+      return;
+    }
+    if (err === "audio-capture") {
+      state.voiceError = "no-mic";
+      showGestureToast("No microphone was found.");
+    }
+    // aborted / no-speech / network: onend will reconnect
+  };
+
+  rec.onend = () => {
+    state.voiceListening = false;
+    updateVoicePillUI();
+    if (voiceEngineArmed && !state.isListening) {
+      restartVoiceRecognizerSoon(240);
     }
   };
 
-  voiceCommandRecognizer.onend = () => {
-    if (state.voiceListening) {
-      setTimeout(() => {
-        if (state.voiceListening) {
-          try { voiceCommandRecognizer.start(); } catch (e) {}
-        }
-      }, 100);
-    } else {
-      updateVoicePillUI();
-    }
-  };
+  voiceCommandRecognizer = rec;
+  try {
+    rec.start();
+  } catch (e) {
+    restartVoiceRecognizerSoon(320);
+  }
+}
+
+async function startVoiceCommandListener() {
+  if (voiceStartInFlight) return;
+  const SpeechRec = getSpeechRecognitionCtor();
+  if (!SpeechRec) {
+    state.voiceError = "unsupported";
+    showGestureToast("Voice commands need Chrome, Edge, or Safari.");
+    updateVoicePillUI();
+    return;
+  }
+  if (state.isListening) {
+    showGestureToast("Pause speech-to-text first, then turn on Hey Cursor.");
+    return;
+  }
+
+  voiceStartInFlight = true;
+  voiceEngineArmed = true;
+  state.voiceError = "";
+  updateVoicePillUI();
 
   try {
-    voiceCommandRecognizer.start();
-    state.voiceListening = true;
-    console.log("[NeuroCursor] Continuous Voice Command Engine initialized.");
-  } catch (e) {}
+    await ensureMicrophonePermission();
+    attachVoiceRecognizer();
+    showGestureToast("Voice on. Say Hey Cursor, then a command.");
+    playSound("success");
+  } catch (err) {
+    voiceEngineArmed = false;
+    state.voiceListening = false;
+    state.voiceError = "mic-blocked";
+    showGestureToast("Allow microphone access to turn on voice control.");
+    updateVoicePillUI();
+  } finally {
+    voiceStartInFlight = false;
+  }
+}
+
+function stopVoiceCommandListener() {
+  voiceEngineArmed = false;
+  state.voiceListening = false;
+  destroyVoiceRecognizer();
+  deactivateVoiceCursorState();
+  updateVoicePillUI();
+}
+
+function initVoiceCommandListener() {
+  startVoiceCommandListener();
 }
 
 function toggleVoiceCommandListener() {
-  if (!voiceCommandRecognizer) {
-    initVoiceCommandListener();
+  if (voiceEngineArmed) {
+    stopVoiceCommandListener();
+    showGestureToast("Voice commands off");
+    playSound("click");
     return;
   }
-  if (state.voiceListening) {
-    state.voiceListening = false;
-    try { voiceCommandRecognizer.stop(); } catch (e) {}
-    deactivateVoiceCursorState();
-    showGestureToast("🔇 Voice Command Listener Paused");
-    playSound("click");
-  } else {
-    state.voiceListening = true;
-    try { voiceCommandRecognizer.start(); } catch (e) {}
-    showGestureToast("🎙️ Voice Cursor Listening: Say 'Hey Cursor'");
-    playSound("success");
-  }
-  updateVoicePillUI();
+  startVoiceCommandListener();
 }
 
 function updateVoicePillUI() {
@@ -924,16 +788,31 @@ function updateVoicePillUI() {
   const status = document.getElementById("voice-command-status");
   if (!pill || !status) return;
 
+  pill.classList.remove("listening", "awake", "error");
+
+  if (state.voiceError === "unsupported" || state.voiceError === "mic-blocked" || state.voiceError === "no-mic") {
+    pill.classList.add("error");
+    status.textContent = state.voiceError === "unsupported" ? "Voice unsupported" : "Mic blocked";
+    return;
+  }
   if (state.voiceCursorActive) {
+    pill.classList.add("awake");
+    status.textContent = "Cursor Awake — listening";
+  } else if (state.voiceListening || voiceEngineArmed) {
     pill.classList.add("listening");
-    status.textContent = "Cursor Awake ⚡";
-  } else if (state.voiceListening) {
-    pill.classList.add("listening");
-    status.textContent = '"Hey Cursor" Ready';
+    status.textContent = state.voiceListening ? "Listening — Hey Cursor" : "Starting mic…";
   } else {
-    pill.classList.remove("listening");
     status.textContent = "Voice: Off";
   }
+}
+
+function normalizeVoiceTranscript(raw) {
+  let t = (raw || "").trim().toLowerCase();
+  t = t.replace(/[.,!?]+/g, " ");
+  t = t.replace(/\b(hey|hi|hello|hay|he)\s+(curser|courser|kursor|cursa|kerser|cursor|curse her|cur sure|ker sure|computer)\b/g, "hey cursor");
+  t = t.replace(/\bokay cursor\b/g, "hey cursor");
+  t = t.replace(/\s+/g, " ").trim();
+  return t;
 }
 
 let lastVoiceCommandTime = 0;
@@ -941,18 +820,16 @@ let lastProcessedCommand = "";
 
 function handleVoiceCommandPhrase(phrase, isFinal = false) {
   const now = performance.now();
-  if (now - lastVoiceCommandTime < 600 && phrase === lastProcessedCommand) {
+  if (now - lastVoiceCommandTime < 700 && phrase === lastProcessedCommand) {
     return;
   }
 
-  console.log("[Voice Command Heard]:", phrase, "isFinal:", isFinal);
-
   // 1. Wake word detection: "Hey Cursor" / "Activate Cursor" / "Wake Up Cursor"
   const wakeWords = [
-    "hey cursor", "hello cursor", "hi cursor",
+    "hey cursor", "hello cursor", "hi cursor", "okay cursor", "ok cursor",
     "activate cursor", "wake up cursor", "wake cursor",
     "cursor wake up", "hey curser", "curser wake up",
-    "a cursor", "the cursor"
+    "neuro cursor", "open cursor"
   ];
 
   let wakeMatched = false;
@@ -971,16 +848,16 @@ function handleVoiceCommandPhrase(phrase, isFinal = false) {
     lastProcessedCommand = phrase;
     activateVoiceCursor();
 
-    // If phrase contained only wake word, keep mic open and wait for next utterance
     if (!remainingPhrase || remainingPhrase.length < 3) {
       return;
     }
-    // If the user spoke a command in the same breath (e.g. "hey cursor point to the speak button...")
     phrase = remainingPhrase;
   }
 
-  // 2. Process command if cursor is active OR if phrase has explicit command triggers
-  const isDirectCommand = /(?:point|go to|move to|navigate to|look at|aim at|target|click|select|pause|sleep|resume|speak|transcribe|water|food|canvas|camera|sos|emergency)/i.test(phrase);
+  // Commands wait for a final transcript so partial words do not fire
+  if (!isFinal) return;
+
+  const isDirectCommand = /(?:point|go to|move|navigate|look at|aim at|target|click|select|pause|sleep|resume|speak|speech|transcribe|water|food|canvas|camera|sos|emergency|center|left|right|up|down|priority|hybrid mode|mouse mode)/i.test(phrase);
 
   if (state.voiceCursorActive || isDirectCommand) {
     processVoiceInstruction(phrase);
@@ -992,7 +869,7 @@ function handleVoiceCommandPhrase(phrase, isFinal = false) {
 function activateVoiceCursor() {
   state.voiceCursorActive = true;
   state.cursorPaused = false;
-  state.headMouseEnabled = true;
+  syncBackendControlMode();
 
   const globalCursor = document.getElementById("global-head-cursor");
   const label = document.getElementById("cursor-voice-label");
@@ -1013,14 +890,16 @@ function activateVoiceCursor() {
   if (voiceActiveTimeout) clearTimeout(voiceActiveTimeout);
   voiceActiveTimeout = setTimeout(() => {
     deactivateVoiceCursorState();
-  }, 14000);
+  }, 20000);
 }
 
 function deactivateVoiceCursorState() {
   state.voiceCursorActive = false;
+  syncBackendControlMode();
   const globalCursor = document.getElementById("global-head-cursor");
   if (globalCursor) {
     globalCursor.classList.remove("voice-listening");
+    if (!state.headMouseEnabled) globalCursor.classList.remove("active");
   }
   updateVoicePillUI();
 }
@@ -1379,9 +1258,33 @@ function matchFeatureIntent(cleanQuery) {
 function processVoiceInstruction(phrase) {
   console.log("[Process Voice Instruction]:", phrase);
 
+  if (/\b(?:head|head movement) mode\b/.test(phrase)) { setControlMode("head"); return; }
+  if (/\b(?:speech|voice) mode\b/.test(phrase)) { setControlMode("speech"); return; }
+  if (/\b(?:physical|regular) mouse mode\b/.test(phrase)) { setControlMode("mouse"); return; }
+  if (/\bhybrid mode\b/.test(phrase)) { setControlMode("hybrid"); return; }
+  if (/\bspeech priority\b/.test(phrase)) { setControlPriority("speech"); return; }
+  if (/\bhead priority\b/.test(phrase)) { setControlPriority("head"); return; }
+  if (state.controlMode === "hybrid" && state.controlPriority === "head" &&
+      /\b(?:point|go to|move|navigate|look at|aim at|target|click|select|choose)\b/i.test(phrase)) {
+    showGestureToast("Head priority is active. Choose Speech priority to navigate by voice.");
+    return;
+  }
+
   // Video mirror toggle voice commands
   if (phrase.includes("mirror video") || phrase.includes("flip video") || phrase.includes("invert video") || phrase.includes("mirror camera")) {
     toggleWebcamMirror();
+    return;
+  }
+
+  // Directional speech navigation. Each command moves a predictable fraction
+  // of the viewport and can be repeated for finer or faster travel.
+  const moveMatch = phrase.match(/\b(?:move|go|nudge|cursor)\s+(?:the\s+)?cursor\s+(?:to\s+)?(left|right|up|down)\b|\b(?:move|go|nudge)\s+(left|right|up|down)\b/i);
+  if (moveMatch) {
+    const direction = (moveMatch[1] || moveMatch[2]).toLowerCase();
+    const amount = phrase.includes("far") || phrase.includes("large") ? 0.22 : 0.08;
+    const x = Math.max(24, Math.min(window.innerWidth - 24, state.smoothNx * window.innerWidth + (direction === "left" ? -1 : direction === "right" ? 1 : 0) * window.innerWidth * amount));
+    const y = Math.max(24, Math.min(window.innerHeight - 24, state.smoothNy * window.innerHeight + (direction === "up" ? -1 : direction === "down" ? 1 : 0) * window.innerHeight * amount));
+    moveCursorToCoordinates(x, y, direction, false);
     return;
   }
 
@@ -1618,13 +1521,7 @@ function glideCursorTo(targetX, targetY, duration = 750, callback = null) {
       voiceGlideAnimationId = requestAnimationFrame(step);
     } else {
       state.isGliding = false;
-      triggerGlobalRipple(targetX, targetY, "#24A98A");
       playSound("click");
-
-      // Recalibrate neutral posture anchor so cursor resumes from this position smoothly
-      const gain = (state.sensitivity / 100.0) * 3.8 + 1.2;
-      state.neutralNoseX = state.rawNx - (0.5 - state.smoothNx) / gain;
-      state.neutralNoseY = state.rawNy - (state.smoothNy - 0.5) / gain;
 
       if (typeof callback === "function") {
         callback(targetX, targetY);
@@ -1683,7 +1580,7 @@ function renderView() {
           </p>
           <div style="display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap;">
             <button class="primary-btn" onclick="toggleHeadMouseControl()">
-              <i data-lucide="scan-face"></i> ${state.headMouseEnabled ? 'Disable In-Browser Head Mouse' : 'Enable In-Browser Head Mouse'}
+              <i data-lucide="scan-face"></i> ${state.headMouseEnabled ? 'Disable Head-Controlled UI Cursor' : 'Enable Head-Controlled UI Cursor'}
             </button>
             <button class="secondary-btn" onclick="toggleOSMouseControl()">
               <i data-lucide="monitor"></i> ${state.osMouseEnabled ? 'OS Physical Mouse: ON' : 'OS Physical Mouse: OFF'}
@@ -1719,7 +1616,7 @@ function renderView() {
           <div class="tile-icon blue"><i data-lucide="camera"></i></div>
           <div>
             <h4>Camera Feed</h4>
-            <p>${state.cameraActive ? 'Webcam active at 30 FPS' : 'Ready to connect'}</p>
+            <p>${state.cameraActive ? `Python camera active at ${state.fps.toFixed(1)} FPS` : 'Start the Python app to connect the camera'}</p>
           </div>
           <span class="badge ${state.cameraActive ? 'success' : 'neutral'}">${state.cameraActive ? 'Active' : 'Standby'}</span>
         </div>
@@ -1728,7 +1625,7 @@ function renderView() {
           <div class="tile-icon teal"><i data-lucide="scan-face"></i></div>
           <div>
             <h4>Head Tracking</h4>
-            <p>Nose tip anchor & 468 landmark points</p>
+            <p>Python Face Landmarker and calibrated head tracking</p>
           </div>
           <span class="badge ${state.headMouseEnabled ? 'success' : 'neutral'}">${state.headMouseEnabled ? 'Tracking ON' : 'Paused'}</span>
         </div>
@@ -1826,7 +1723,7 @@ function renderView() {
               <div class="reticle-ripple" id="reticle-ripple-node"></div>
             </div>
             <div class="cursor-zone-caption">
-              Move your head or cursor here • Dwell or open mouth to click
+              Hold still for the green dwell circle • Smile / left wink: left click
             </div>
           </div>
 
@@ -1846,7 +1743,7 @@ function renderView() {
           <div style="display: flex; gap: 12px; flex-wrap: wrap;">
             <button id="btn-toggle-head-mouse" class="primary-btn full-btn" onclick="toggleHeadMouseControl()">
               <i data-lucide="scan-face"></i>
-              ${state.headMouseEnabled ? 'Disable In-Browser Head Mouse' : 'Enable In-Browser Head Mouse'}
+              ${state.headMouseEnabled ? 'Disable Head-Controlled UI Cursor' : 'Enable Head-Controlled UI Cursor'}
             </button>
             <button id="btn-toggle-os-mouse" class="secondary-btn full-btn" onclick="toggleOSMouseControl()">
               <i data-lucide="monitor"></i>
@@ -1868,10 +1765,9 @@ function renderView() {
           </div>
 
           <div class="webcam-panel" id="webcam-container">
-            <video class="webcam-video" id="live-webcam-element" autoplay playsinline muted></video>
-            <canvas class="webcam-mesh-canvas" id="vision-canvas"></canvas>
+            <img class="webcam-video" id="live-webcam-element" alt="Preview from the Python vision pipeline" />
             <div class="webcam-hud">
-              <span class="hud-pill"><i data-lucide="eye" style="width:12px;display:inline;"></i> GAZE ACTIVE</span>
+              <span class="hud-pill"><i data-lucide="scan-face" style="width:12px;display:inline;"></i> PYTHON VISION</span>
               <button class="hud-pill" style="cursor:pointer; background:rgba(15,23,42,0.82); border:1px solid rgba(255,255,255,0.2); color:#fff;" onclick="toggleWebcamMirror()" title="Toggle Video Mirror">
                 <i data-lucide="flip-horizontal" style="width:12px;display:inline;"></i> ${state.mirrorVideo ? 'MIRRORED' : 'NORMAL (NON-INVERTED)'}
               </button>
@@ -1885,7 +1781,7 @@ function renderView() {
             </div>
             <div class="telemetry-box">
               <small>Lighting Quality</small>
-              <strong style="color:var(--primary-blue);">Optimal</strong>
+              <strong style="color:var(--primary-blue);">${state.cameraBrightness >= 40 ? 'Good' : state.cameraBrightness > 0 ? 'Low' : '—'} · ${state.faceQuality.toFixed(2)}</strong>
             </div>
             <div class="telemetry-box">
               <small>Gesture Status</small>
@@ -1894,8 +1790,8 @@ function renderView() {
           </div>
 
           <div style="display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap;">
-            <button id="btn-connect-webcam" class="primary-btn teal-btn" style="flex: 1;" onclick="${state.cameraActive ? 'stopCameraVision()' : 'startCameraVision()'}">
-              <i data-lucide="camera"></i> ${state.cameraActive ? 'Disconnect Camera' : 'Connect Live Webcam'}
+            <button id="btn-connect-webcam" class="primary-btn teal-btn" style="flex: 1;" onclick="startCameraVision()">
+              <i data-lucide="camera"></i> ${state.cameraActive ? `Python Camera · ${state.fps.toFixed(0)} FPS` : 'Check Python Camera'}
             </button>
             <button id="btn-toggle-mirror" class="secondary-btn" onclick="toggleWebcamMirror()" title="Toggle Horizontal Mirroring">
               <i data-lucide="flip-horizontal"></i> ${state.mirrorVideo ? 'Mirror: ON' : 'Normal Feed'}
@@ -1904,12 +1800,12 @@ function renderView() {
               <i data-lucide="flip-vertical"></i> ${state.flipVVideo ? 'Flip V: ON' : 'Flip V'}
             </button>
             <button id="btn-5point-calib" class="secondary-btn" onclick="startCalibration()">
-              <i data-lucide="target"></i> 5-Point Calibration
+              <i data-lucide="target"></i> Guided Head Calibration
             </button>
           </div>
 
           <p style="font-size: 0.76rem; color: var(--text-muted); margin-top: 12px; text-align: center;">
-            🔒 100% Privacy Protection: All face landmarks, gesture detection, and speech recognition run locally in your browser.
+            🔒 Webcam frames and face tracking stay in the local Python vision pipeline. The page receives tracking telemetry over Flask SSE.
           </p>
         </div>
       </div>
@@ -1928,7 +1824,7 @@ function renderView() {
             </label>
             <input id="speed-slider" type="range" min="10" max="100" value="${state.sensitivity}" oninput="updateSensitivity(this.value)" />
             <p style="font-size: 0.78rem; color: var(--text-muted);">
-              Higher values allow full screen reach with small head rotations.
+              Keep this low for precise aiming. Raise it only if you cannot reach screen edges.
             </p>
           </div>
 
@@ -1945,12 +1841,6 @@ function renderView() {
       </div>
     `;
 
-    if (state.cameraActive && videoElement) {
-      const containerVideo = document.getElementById("live-webcam-element");
-      if (containerVideo && containerVideo !== videoElement) {
-        containerVideo.srcObject = videoElement.srcObject;
-      }
-    }
   }
 
   // 3. VOICE & COMMUNICATION
@@ -1959,7 +1849,7 @@ function renderView() {
       <div>
         <p class="eyebrow">VOICE & TYPING</p>
         <h1 class="page-title">Voice & Communication<span class="accent-dot">.</span></h1>
-        <p class="subheading">Speak aloud with live audio waveforms, use quick assistance phrases, or type with the on-screen keyboard.</p>
+        <p class="subheading">Turn on the Voice pill in the top bar, say Hey Cursor, then a command. Use the large mic below only for speech-to-text.</p>
       </div>
 
       <div class="comm-layout">
@@ -2356,7 +2246,7 @@ function renderView() {
               <i data-lucide="chevron-down" class="faq-icon" style="transition: transform 0.2s;"></i>
             </button>
             <div class="faq-answer">
-              NeuroCursor tracks your nose tip in 3D space using MediaPipe FaceMesh. When you turn your head left, right, up, or down from your neutral anchor, the on-screen cursor moves accordingly. Exponential smoothing prevents muscle tremor jitter.
+              Python captures the webcam and applies MediaPipe Face Landmarker, calibration, and filtering. The page displays the Python preview and consumes normalized cursor coordinates over Flask SSE.
             </div>
           </div>
 
@@ -2380,7 +2270,7 @@ function renderView() {
               <i data-lucide="chevron-down" class="faq-icon" style="transition: transform 0.2s;"></i>
             </button>
             <div class="faq-answer">
-              No! NeuroCursor is 100% client-side and standalone. Head tracking runs via MediaPipe FaceMesh WebAssembly, speech recognition uses the Web Speech API, and speech synthesis is powered by native browser synthesis. Your camera feed never leaves your device.
+              The integrated application runs webcam capture, face tracking, calibration, and gestures locally in Python. Flask streams local camera preview and telemetry to the interface; no camera frames are sent to a cloud service.
             </div>
           </div>
         </div>
@@ -2414,25 +2304,31 @@ function triggerReticleRipple(e) {
   playSound("click");
 }
 
-// 5-Point Calibration Sequence
+// Five-step calibration is sampled and applied by the Python camera worker.
 const calibCoords = [
-  { x: "18%", y: "22%", title: "Top-Left Target", desc: "Keep head still and look directly at the beacon" },
-  { x: "82%", y: "22%", title: "Top-Right Target", desc: "Follow the target to the right" },
-  { x: "82%", y: "78%", title: "Bottom-Right Target", desc: "Look toward the lower-right target" },
-  { x: "18%", y: "78%", title: "Bottom-Left Target", desc: "Look toward the lower-left target" },
-  { x: "50%", y: "50%", title: "Center Target", desc: "Look forward in your natural resting posture" }
+  { step: "neutral", x: "50%", y: "50%", title: "Neutral Position", desc: "Relax your face and look straight ahead while Python samples." },
+  { step: "right", x: "82%", y: "50%", title: "Comfortable Right Range", desc: "Move your head comfortably to the right and hold." },
+  { step: "left", x: "18%", y: "50%", title: "Comfortable Left Range", desc: "Move your head comfortably to the left and hold." },
+  { step: "up", x: "50%", y: "22%", title: "Comfortable Up Range", desc: "Move your head comfortably upward and hold." },
+  { step: "down", x: "50%", y: "78%", title: "Comfortable Down Range", desc: "Move your head comfortably downward and hold." }
 ];
 
-function startCalibration() {
+async function startCalibration() {
+  if (!backendConnected || !state.cameraActive) {
+    showGestureToast("Connect the live Python camera before calibration.");
+    return;
+  }
+  calibrationPreviousPause = !!state.cursorPaused;
+  callBackend("/pause");
   state.calibrating = true;
   state.calibStep = 0;
   const overlay = document.getElementById("calibration-overlay");
   if (overlay) overlay.classList.add("active");
   playSound("success");
-  advanceCalibrationStep();
+  await advanceCalibrationStep();
 }
 
-function advanceCalibrationStep() {
+async function advanceCalibrationStep() {
   if (!state.calibrating) return;
   const target = document.getElementById("calib-target-node");
   const title = document.getElementById("calib-step-title");
@@ -2446,26 +2342,38 @@ function advanceCalibrationStep() {
     }
     if (title) title.textContent = pt.title;
     if (desc) desc.textContent = pt.desc;
+    const result = await callBackend("/vision/calibration/step", { step: pt.step, duration_sec: 1.8 });
+    if (!result.ok) {
+      showGestureToast(result.error || "Python calibration step failed.");
+      cancelCalibration();
+      return;
+    }
     playSound("click");
 
     setTimeout(() => {
       state.calibStep++;
       advanceCalibrationStep();
-    }, 1800);
+    }, 2050);
   } else {
-    state.neutralNoseX = state.rawNx || 0.5;
-    state.neutralNoseY = state.rawNy || 0.45;
+    const result = await callBackend("/vision/calibration/commit");
+    if (!result.ok) {
+      showGestureToast(result.error || "Could not save Python calibration.");
+      cancelCalibration();
+      return;
+    }
     if (title) title.textContent = "Calibration Complete! 🎉";
-    if (desc) desc.textContent = "Neutral posture and range boundaries have been saved.";
+    if (desc) desc.textContent = "Python saved your neutral pose and comfortable head movement ranges.";
     playSound("success");
     setTimeout(() => {
-      cancelCalibration();
+      cancelCalibration(true);
     }, 1200);
   }
 }
 
-function cancelCalibration() {
+function cancelCalibration(completed = false) {
+  if (state.calibrating && !completed) callBackend("/vision/calibration/cancel");
   state.calibrating = false;
+  callBackend(calibrationPreviousPause ? "/pause" : "/resume");
   const overlay = document.getElementById("calibration-overlay");
   if (overlay) overlay.classList.remove("active");
   playSound("click");
@@ -2586,6 +2494,8 @@ function toggleSpeechRecognition() {
             try { speechRecognition.start(); } catch (err) {}
           }
         }, 150);
+      } else if (voiceEngineArmed) {
+        restartVoiceRecognizerSoon(200);
       }
     };
 
@@ -2601,6 +2511,9 @@ function toggleSpeechRecognition() {
   }
 
   if (!state.isListening) {
+    if (voiceEngineArmed) {
+      destroyVoiceRecognizer();
+    }
     try {
       speechRecognition.start();
       state.isListening = true;
@@ -2614,6 +2527,7 @@ function toggleSpeechRecognition() {
     try { speechRecognition.stop(); } catch (e) {}
     playSound("click");
     showGestureToast("Speech recognition paused.");
+    if (voiceEngineArmed) restartVoiceRecognizerSoon(250);
   }
   renderView();
 }
@@ -2809,6 +2723,9 @@ function updateSensitivity(val) {
   const el = document.getElementById("speed-slider-val");
   if (el) el.textContent = val + "%";
   saveLocalPreferences();
+  callBackend("/vision/sensitivity", { value: state.sensitivity }).then(result => {
+    if (!result.ok && backendConnected) showGestureToast(result.error || "Could not update Python tracking sensitivity.");
+  });
 }
 
 function updateDwell(val) {
@@ -2826,7 +2743,8 @@ function saveLocalPreferences() {
       activeProfile: state.activeProfile,
       highContrast: state.highContrast,
       largeInterface: state.largeInterface,
-      reducedAnimation: state.reducedAnimation
+      reducedAnimation: state.reducedAnimation,
+      pointerTune: "v3"
     }));
   } catch (err) {}
 }
@@ -2836,7 +2754,14 @@ function loadLocalPreferences() {
     const saved = localStorage.getItem("neuro_settings");
     if (saved) {
       const cfg = JSON.parse(saved);
-      if (cfg.sensitivity) state.sensitivity = cfg.sensitivity;
+      if (cfg.sensitivity != null) {
+        let s = Number(cfg.sensitivity);
+        if (cfg.pointerTune !== "v3") {
+          s = Math.round(10 + (s - 10) * 0.5);
+          s = Math.max(10, Math.min(48, s));
+        }
+        state.sensitivity = s;
+      }
       if (cfg.dwell) state.dwell = cfg.dwell;
       if (cfg.activeProfile) state.activeProfile = cfg.activeProfile;
       if (cfg.highContrast !== undefined) {
@@ -2858,12 +2783,6 @@ function loadLocalPreferences() {
       if (Array.isArray(parsed) && parsed.length > 0) {
         state.contacts = parsed;
       }
-    }
-    const nx = localStorage.getItem("neuro_neutral_x");
-    const ny = localStorage.getItem("neuro_neutral_y");
-    if (nx && ny) {
-      state.neutralNoseX = parseFloat(nx);
-      state.neutralNoseY = parseFloat(ny);
     }
   } catch (e) {
     console.log("[NeuroCursor] Local preferences load:", e);
@@ -2915,32 +2834,30 @@ document.addEventListener("DOMContentLoaded", () => {
   const globalCursor = document.getElementById("global-head-cursor");
   if (globalCursor) globalCursor.classList.add("active");
   const headMouseBtn = document.getElementById("head-mouse-toggle-btn");
-  if (headMouseBtn) headMouseBtn.classList.add("active");
+  if (headMouseBtn) headMouseBtn.classList.toggle("active", state.headMouseEnabled);
   const headMouseTxt = document.getElementById("head-mouse-status-text");
-  if (headMouseTxt) headMouseTxt.textContent = "Head Mouse: ON";
+  if (headMouseTxt) headMouseTxt.textContent = state.headMouseEnabled ? "Head Mouse: ON" : state.controlMode === "speech" ? "Speech Cursor" : "Physical Mouse";
 
   // Load user saved settings from browser localStorage
   loadLocalPreferences();
+  const modeSelect = document.getElementById("control-mode-select");
+  const prioritySelect = document.getElementById("control-priority-select");
+  if (modeSelect) modeSelect.value = state.controlMode;
+  if (prioritySelect) prioritySelect.value = state.controlPriority;
+  if (prioritySelect) prioritySelect.disabled = state.controlMode !== "hybrid";
 
   updateNavigation();
   renderView();
 
   // Auto-start camera feed & synchronise streams
   startCameraVision();
+  syncBackendControlMode();
   syncWebcamVideoStreams();
-
-  // Initialize continuous Voice-Interactive Cursor Listener
-  initVoiceCommandListener();
-
-  // Ensure voice listener is enabled on first interaction if blocked by browser autoplay policy
-  const startVoiceOnGesture = () => {
-    if (!state.voiceListening) {
-      initVoiceCommandListener();
+  updateVoicePillUI();
+  setTimeout(() => {
+    if (!voiceEngineArmed) {
+      showGestureToast("Click Voice: Off in the top bar, allow the microphone, then say Hey Cursor");
     }
-    document.removeEventListener("click", startVoiceOnGesture);
-    document.removeEventListener("keydown", startVoiceOnGesture);
-  };
-  document.addEventListener("click", startVoiceOnGesture);
-  document.addEventListener("keydown", startVoiceOnGesture);
+  }, 1400);
 });
 

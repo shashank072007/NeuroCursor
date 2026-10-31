@@ -14,6 +14,13 @@ from .config import (
 )
 from .bus import make_msg
 
+DEFAULT_GESTURE_BINDINGS = {
+    "smile": "left_click",
+    "mouth_open": "right_click",
+    "wink_left": "left_click",
+    "wink_right": "right_click",
+}
+
 
 class IntentGuard:
     """The bouncer: validates user intent before executing OS actions."""
@@ -73,7 +80,8 @@ class IntentGuard:
         profile: Dict[str, Any],
         paused: bool,
         locked: bool,
-        face_lost: bool
+        face_lost: bool,
+        control_enabled: bool = True
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Process a frame through IntentGuard.
         Returns: (guard_msg, action_msg, dwell_pending_msg)
@@ -104,7 +112,9 @@ class IntentGuard:
         g_score = float(gesture.get("score", 0.0)) if gesture else 0.0
         g_held_ms = float(gesture.get("held_ms", 0.0)) if gesture else 0.0
 
-        is_real_gesture = (g_name is not None and g_name != "none")
+        # Brow raise is a pause/resume control handled by the UI; never let it
+        # fall through to the generic left-click binding.
+        is_real_gesture = g_name not in (None, "none", "brow_raise")
 
         base_threshold = profile.get("gesture_thresholds", {}).get(g_name, 0.50) if is_real_gesture else 0.50
         emit_floor = base_threshold * EMIT_FLOOR_FACTOR
@@ -112,7 +122,9 @@ class IntentGuard:
         # Check if gesture channel is active
         channel_enabled = (primary_channel == "gesture")
         # Action mapped to gesture (mouth_open -> left_click, etc.)
-        gesture_action = profile.get("gesture_bindings", {}).get(g_name, "left_click")
+        gesture_action = profile.get("gesture_bindings", {}).get(
+            g_name, DEFAULT_GESTURE_BINDINGS.get(g_name, "none")
+        )
 
         # Thresholds modified by adaptation ui_state
         thresh_mult = ui_state.get("gesture_threshold_mult", 1.0)
@@ -134,7 +146,7 @@ class IntentGuard:
             # If not yet spent, evaluate checks in section G order
             if not self.episode_spent:
                 # Check 1: paused or locked
-                if paused or locked:
+                if paused or locked or not control_enabled:
                     self.episode_spent = True
                     guard_msg = make_msg("guard", state="CANDIDATE", action=gesture_action, channel="gesture",
                                          decision="reject", reason="paused", pointer_speed=pointer_speed)
@@ -202,7 +214,10 @@ class IntentGuard:
                 # If released before reaching required_hold_ms without firing, reject as gesture_short
                 if not self.episode_spent:
                     self.episode_spent = True
-                    action_name = profile.get("gesture_bindings", {}).get(self.current_gesture_name, "left_click")
+                    action_name = profile.get("gesture_bindings", {}).get(
+                        self.current_gesture_name,
+                        DEFAULT_GESTURE_BINDINGS.get(self.current_gesture_name, "none")
+                    )
                     if self.episode_max_held_ms < required_hold_ms:
                         guard_msg = make_msg("guard", state="CANDIDATE", action=action_name, channel="gesture",
                                              decision="reject", reason="gesture_short", pointer_speed=pointer_speed)
@@ -220,7 +235,7 @@ class IntentGuard:
         # -------------------------------------------------------------
         # 2. DWELL PROCESSING (when primary is dwell)
         # -------------------------------------------------------------
-        if primary_channel == "dwell" and head and not face_lost and detected:
+        if control_enabled and primary_channel == "dwell" and head and not face_lost and detected:
             dist_from_anchor = math.hypot(nx - self.dwell_anchor_nx, ny - self.dwell_anchor_ny)
             dwell_target_ms = ui_state.get("dwell_ms", 1000)
 

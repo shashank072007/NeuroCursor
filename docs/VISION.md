@@ -10,6 +10,8 @@
 
 The **Vision Subsystem** provides hands-free cursor control and physical expression detection for assistive navigation. It operates at $\ge 25\text{ FPS}$ (30 FPS target), acquiring standard RGB camera frames, detecting 478 3D facial landmarks via MediaPipe Tasks, computing One Euro Filtered normalized coordinates and raw scale-invariant ability signals, debouncing physical expressions, and publishing frame events to a non-blocking queue.
 
+In the integrated application, this Python subsystem is the only webcam owner. Flask forwards tracking frames and performance data to the frontend over SSE and serves a low-rate MJPEG preview encoded from the same captured frames. The browser does not request webcam access or run a second landmark model.
+
 ```
  Webcam Capture (CameraManager)
          │

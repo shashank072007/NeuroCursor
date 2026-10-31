@@ -119,8 +119,8 @@ class TestPointerTracker(unittest.TestCase):
         self.assertAlmostEqual(res.raw_dx, 0.0, delta=0.01)
         self.assertAlmostEqual(res.raw_dy, 0.0, delta=0.01)
 
-    def test_rightward_movement(self):
-        # Move right by 0.10 in viewport (0.10 / 0.40 = 0.25 face-width units = full right range)
+    def test_horizontal_camera_motion_is_mirrored_for_cursor(self):
+        # A rightward shift in camera coordinates maps to a leftward cursor shift.
         face = FaceMeshResult(
             detected=True,
             quality=0.90,
@@ -131,7 +131,7 @@ class TestPointerTracker(unittest.TestCase):
         )
         res = self.tracker.update(face, timestamp=2.0)
         self.assertTrue(res.detected)
-        self.assertGreater(res.nx, 0.70)
+        self.assertLess(res.nx, 0.30)
         self.assertAlmostEqual(res.raw_dx, 0.25, delta=0.02)
         self.assertAlmostEqual(res.raw_dy, 0.0, delta=0.02)
 

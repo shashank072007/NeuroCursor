@@ -26,7 +26,7 @@ from backend.profiles import profile_mgr
 from backend.calibration import calibration_engine
 from backend.safety import safety_manager
 from backend.os_control import os_controller
-from backend.intent_guard import IntentGuard
+from backend.intent_guard import IntentGuard, DEFAULT_GESTURE_BINDINGS
 from backend.effort import EffortMeter
 from backend.adapt import AdaptiveEngine, ADAPTATION_TABLE
 from backend.channels import ChannelManager
@@ -215,9 +215,43 @@ class TestIntentGuard(unittest.TestCase):
         self.assertEqual(guard_msg["decision"], "allow")
         self.assertIsNone(guard_msg["reason"])
         self.assertIsNotNone(action_msg)
-        self.assertEqual(action_msg["action"], "left_click")
+        self.assertEqual(action_msg["action"], "right_click")
         self.assertFalse(action_msg["undone"])
         self.assertGreater(action_msg["latency_ms"], 0)
+
+    def test_control_mode_disables_gesture_execution(self):
+        frame = make_msg(
+            "frame",
+            face={"detected": True, "quality": 0.95},
+            head={"nx": 0.5, "ny": 0.5},
+            gesture={"name": "smile", "score": 0.95, "held_ms": 500}
+        )
+        guard_msg, action_msg, _ = self.guard.process_frame(
+            frame, self.ui_state, self.profile, paused=False, locked=False,
+            face_lost=False, control_enabled=False
+        )
+        self.assertIsNotNone(guard_msg)
+        self.assertEqual(guard_msg["reason"], "paused")
+        self.assertIsNone(action_msg)
+
+    def test_left_click_gestures_remain_smile_and_left_wink(self):
+        self.assertEqual(DEFAULT_GESTURE_BINDINGS["smile"], "left_click")
+        self.assertEqual(DEFAULT_GESTURE_BINDINGS["wink_left"], "left_click")
+        self.assertEqual(DEFAULT_GESTURE_BINDINGS["wink_right"], "right_click")
+        self.assertEqual(DEFAULT_GESTURE_BINDINGS["mouth_open"], "right_click")
+
+    def test_validated_left_wink_executes_left_click(self):
+        frame = make_msg(
+            "frame",
+            face={"detected": True, "quality": 0.95},
+            head={"nx": 0.5, "ny": 0.5},
+            gesture={"name": "wink_left", "score": 0.90, "held_ms": 300}
+        )
+        _, action_msg, _ = self.guard.process_frame(
+            frame, self.ui_state, self.profile, paused=False, locked=False, face_lost=False
+        )
+        self.assertIsNotNone(action_msg)
+        self.assertEqual(action_msg["action"], "left_click")
 
     def test_undo_action(self):
         now = time.time()
@@ -239,6 +273,22 @@ class TestIntentGuard(unittest.TestCase):
         self.assertIsNotNone(undone)
         self.assertEqual(undone["seq"], orig_seq)  # Same seq (G8)
         self.assertTrue(undone["undone"])
+
+    def test_brow_raise_is_not_a_click(self):
+        now = time.time()
+        frame = make_msg(
+            "frame",
+            face={"detected": True, "quality": 0.95},
+            head={"nx": 0.5, "ny": 0.5, "raw_dx": 0.0, "raw_dy": 0.0},
+            gesture={"name": "brow_raise", "score": 0.95, "held_ms": 500}
+        )
+        _, action_msg, _ = self.guard.process_frame(
+            frame, self.ui_state, self.profile, paused=False, locked=False, face_lost=False
+        )
+        self.assertIsNone(action_msg)
+
+    def test_simulated_right_click_is_supported(self):
+        self.assertTrue(os_controller.right_click(100, 100))
 
 
 class TestEffortAndAdaptation(unittest.TestCase):
@@ -344,12 +394,53 @@ class TestAppEndpoints(unittest.TestCase):
         res = self.client.get("/profiles")
         self.assertEqual(res.status_code, 401)
 
+    def test_camera_preview_requires_token(self):
+        res = self.client.get("/camera/stream")
+        self.assertEqual(res.status_code, 401)
+
+    def test_camera_preview_relays_python_encoded_frame(self):
+        from types import SimpleNamespace
+        import backend.app as app_mod
+        old_source = app_mod.pipeline.frame_source
+        app_mod.pipeline.frame_source = SimpleNamespace(
+            producer=SimpleNamespace(latest_jpeg_frame_index=3, latest_jpeg=b"python-jpeg-frame")
+        )
+        try:
+            response = self.client.get(f"/camera/stream?token={SERVER_TOKEN}", buffered=False)
+            first_chunk = next(response.response)
+            self.assertIn("multipart/x-mixed-replace", response.headers["Content-Type"])
+            self.assertIn(b"python-jpeg-frame", first_chunk)
+            response.close()
+        finally:
+            app_mod.pipeline.frame_source = old_source
+
+    def test_live_vision_controls_do_not_claim_mock_tracking(self):
+        headers = {"X-Flux-Token": SERVER_TOKEN}
+        self.assertEqual(self.client.post("/vision/recenter", headers=headers).status_code, 503)
+        self.assertEqual(
+            self.client.post("/vision/sensitivity", headers=headers, json={"value": 50}).status_code,
+            503
+        )
+        self.assertEqual(
+            self.client.post("/vision/calibration/step", headers=headers, json={"step": "neutral"}).status_code,
+            503
+        )
+
     def test_authorized_with_token(self):
         headers = {"X-Flux-Token": SERVER_TOKEN}
         res = self.client.get("/profiles", headers=headers)
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertIn("profiles", data)
+
+    def test_control_mode_endpoint(self):
+        headers = {"X-Flux-Token": SERVER_TOKEN}
+        for mode in ("head", "speech", "mouse", "hybrid"):
+            response = self.client.post("/control-mode", headers=headers, json={"mode": mode})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["mode"], mode)
+        invalid = self.client.post("/control-mode", headers=headers, json={"mode": "unknown"})
+        self.assertEqual(invalid.status_code, 400)
 
     def test_pause_resume_endpoints(self):
         headers = {"X-Flux-Token": SERVER_TOKEN}

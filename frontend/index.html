@@ -7,10 +7,6 @@
   <meta name="description" content="Auralight design system for NeuroCursor: hands-free head tracking, camera cursor coordination, speech-to-text, and assistive tools.">
   <link rel="stylesheet" href="App.css">
   
-  <!-- MediaPipe Face Mesh & Camera Utils for Real In-Browser Head Tracking -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
-  
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
@@ -19,7 +15,7 @@
   <div id="global-head-cursor" class="global-head-cursor">
     <div class="cursor-voice-halo" id="cursor-voice-halo"></div>
     <div class="cursor-voice-label" id="cursor-voice-label">"HEY CURSOR"</div>
-    <svg class="dwell-svg" viewBox="0 0 58 58">
+    <svg class="dwell-svg" viewBox="0 0 58 58" aria-hidden="true">
       <circle class="dwell-circle-bg" cx="29" cy="29" r="25"></circle>
       <circle class="dwell-circle-bar" id="dwell-progress-bar" cx="29" cy="29" r="25"></circle>
     </svg>
@@ -38,11 +34,11 @@
     </button>
   </div>
 
-  <!-- Persistent Picture-in-Picture Webcam Stream (Always Active) -->
-  <div id="pip-camera-container" class="pip-camera-box" title="Live Camera Feed & Tracking">
-    <video id="persistent-webcam" autoplay playsinline muted></video>
+  <!-- Preview frames are encoded by Python's single camera/vision worker. -->
+  <div id="pip-camera-container" class="pip-camera-box" title="Python Vision Camera Preview">
+    <img id="persistent-webcam" alt="Python vision camera preview" />
     <div class="pip-badge">
-      <span class="pip-dot"></span> <span id="pip-status-label">Webcam Active</span>
+      <span class="pip-dot"></span> <span id="pip-status-label">Connecting to Python Vision</span>
     </div>
   </div>
 
@@ -133,10 +129,10 @@
         </div>
         <div class="top-actions">
           <!-- Voice Interactive Cursor Command Pill -->
-          <button class="voice-command-pill" id="voice-command-pill" onclick="toggleVoiceCommandListener()" title="Say 'Hey Cursor' then 'Point towards...' to navigate hands-free">
+          <button type="button" class="voice-command-pill" id="voice-command-pill" onclick="toggleVoiceCommandListener()" title="Turn on voice control, then say Hey Cursor">
             <span class="voice-mic-wave"></span>
             <i data-lucide="mic" style="width: 14px; height: 14px;"></i>
-            <span id="voice-command-status">"Hey Cursor" Ready</span>
+            <span id="voice-command-status">Voice: Off</span>
           </button>
 
           <!-- Master Head Mouse Toggle -->
@@ -144,6 +140,18 @@
             <i data-lucide="scan-face" style="width: 15px; height: 15px;"></i>
             <span id="head-mouse-status-text">Head Mouse: OFF</span>
           </button>
+          <label class="sr-only" for="control-mode-select">Cursor control mode</label>
+          <select id="control-mode-select" class="topbar-control-select" aria-label="Cursor control mode" onchange="setControlMode(this.value)">
+            <option value="head">Head + gestures</option>
+            <option value="speech">Speech cursor</option>
+            <option value="mouse">Physical mouse</option>
+            <option value="hybrid">Head + speech</option>
+          </select>
+          <label class="sr-only" for="control-priority-select">Cursor priority</label>
+          <select id="control-priority-select" class="topbar-control-select" aria-label="Cursor priority" onchange="setControlPriority(this.value)">
+            <option value="head">Head priority</option>
+            <option value="speech">Speech priority</option>
+          </select>
 
           <div class="status-badge" id="camera-status-pill">
             <span class="status-dot" id="status-dot-indicator"></span>

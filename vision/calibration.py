@@ -145,11 +145,21 @@ class CalibrationManager:
         if self.step == CalibrationStep.COMPLETE:
             return True, "Calibration complete."
 
-        if not face_result.detected or face_result.quality < 0.5:
-            return False, "Face not detected or quality too low; please face the camera."
-
         elapsed = time.time() - self._step_start_time
         remaining = max(0.0, self._step_duration_sec - elapsed)
+        if not face_result.detected or face_result.quality < 0.5:
+            if elapsed < self._step_duration_sec:
+                return False, "Face not detected or quality too low; please face the camera."
+            # Close an expired step even when tracking was lost so the caller can
+            # report insufficient samples instead of silently advancing forever.
+            if self.step == CalibrationStep.COLLECTING_NEUTRAL and self._neutral_samples_x:
+                self._finish_neutral()
+            elif self.step in (CalibrationStep.RANGE_LEFT, CalibrationStep.RANGE_RIGHT,
+                               CalibrationStep.RANGE_UP, CalibrationStep.RANGE_DOWN) and self._range_samples:
+                self._finish_range(self.step.value.replace("range_", ""))
+            else:
+                self.step = CalibrationStep.IDLE
+            return True, "Calibration step ended without a valid face sample."
 
         if self.step == CalibrationStep.COLLECTING_NEUTRAL:
             if face_result.center_x is not None and face_result.center_y is not None and face_result.width_norm is not None:

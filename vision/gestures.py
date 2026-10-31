@@ -65,8 +65,8 @@ class GestureDetector:
     def __init__(
         self,
         profile: Optional[CalibrationProfile] = None,
-        activation_frames: int = 2,  # ~60ms at 30 FPS to filter single-frame glitches
-        release_frames: int = 2,     # ~60ms to prevent release flutter
+        activation_frames: int = 3,  # ~100ms at 30 FPS to reject brief expression spikes
+        release_frames: int = 3,     # ~100ms hysteresis avoids release flutter
     ) -> None:
         self.profile = profile or CalibrationProfile()
         self.activation_frames = activation_frames
