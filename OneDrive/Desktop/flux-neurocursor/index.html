@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NeuroCursor — Accessible Control, Beautifully Designed</title>
+  <meta name="description" content="Auralight design system for NeuroCursor: hands-free head tracking, camera cursor coordination, speech-to-text, and assistive tools.">
+  <link rel="stylesheet" href="App.css">
+  
+  <!-- MediaPipe Face Mesh & Camera Utils for Real In-Browser Head Tracking -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+  <!-- Global Head-Controlled Cursor Pointer with Dwell Ring & Voice Halo -->
+  <div id="global-head-cursor" class="global-head-cursor">
+    <div class="cursor-voice-halo" id="cursor-voice-halo"></div>
+    <div class="cursor-voice-label" id="cursor-voice-label">"HEY CURSOR"</div>
+    <svg class="dwell-svg" viewBox="0 0 58 58">
+      <circle class="dwell-circle-bg" cx="29" cy="29" r="25"></circle>
+      <circle class="dwell-circle-bar" id="dwell-progress-bar" cx="29" cy="29" r="25"></circle>
+    </svg>
+    <div class="cursor-core-dot"></div>
+  </div>
+
+  <!-- Guided Calibration Interactive Modal Overlay -->
+  <div class="calibration-overlay" id="calibration-overlay">
+    <div class="calib-step-banner">
+      <h2 id="calib-step-title">Calibrating Movements</h2>
+      <p id="calib-step-desc">Focus your eyes and head on the pulsing target</p>
+    </div>
+    <div class="calib-target" id="calib-target-node"></div>
+    <button class="secondary-btn" style="position: absolute; bottom: 40px; color: #fff; background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.3);" onclick="cancelCalibration()">
+      Exit Calibration
+    </button>
+  </div>
+
+  <!-- Persistent Picture-in-Picture Webcam Stream (Always Active) -->
+  <div id="pip-camera-container" class="pip-camera-box" title="Live Camera Feed & Tracking">
+    <video id="persistent-webcam" autoplay playsinline muted></video>
+    <div class="pip-badge">
+      <span class="pip-dot"></span> <span id="pip-status-label">Webcam Active</span>
+    </div>
+  </div>
+
+  <!-- Floating Toast Notification for Real-Time Gestures -->
+  <div id="gesture-toast" class="gesture-toast"></div>
+
+  <div class="app-shell">
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">
+          <i data-lucide="scan-face" style="width: 24px; height: 24px;"></i>
+        </div>
+        <div>
+          <h2>Neuro<span>Cursor</span></h2>
+          <p>ACCESSIBILITY SUITE</p>
+        </div>
+      </div>
+
+      <div class="workspace-label">WORKSPACE</div>
+      <nav id="nav-container">
+        <button class="nav-item active" data-page="dashboard" id="nav-dashboard">
+          <i data-lucide="layout-dashboard"></i>
+          <span>Dashboard</span>
+          <i data-lucide="chevron-right" class="nav-chevron"></i>
+        </button>
+        <button class="nav-item" data-page="control" id="nav-control">
+          <i data-lucide="mouse-pointer-2"></i>
+          <span>Live Cursor</span>
+          <i data-lucide="chevron-right" class="nav-chevron"></i>
+        </button>
+        <button class="nav-item" data-page="communication" id="nav-communication">
+          <i data-lucide="mic"></i>
+          <span>Voice & Communication</span>
+          <i data-lucide="chevron-right" class="nav-chevron"></i>
+        </button>
+        <button class="nav-item" data-page="studio" id="nav-studio">
+          <i data-lucide="palette"></i>
+          <span>Creative Studio</span>
+          <i data-lucide="chevron-right" class="nav-chevron"></i>
+        </button>
+        <button class="nav-item" data-page="sos" id="nav-sos">
+          <i data-lucide="shield-alert"></i>
+          <span>SOS & Caregiver</span>
+          <i data-lucide="chevron-right" class="nav-chevron"></i>
+        </button>
+        <button class="nav-item" data-page="settings" id="nav-settings">
+          <i data-lucide="sliders-horizontal"></i>
+          <span>Personalisation</span>
+          <i data-lucide="chevron-right" class="nav-chevron"></i>
+        </button>
+        <button class="nav-item" data-page="help" id="nav-help">
+          <i data-lucide="life-buoy"></i>
+          <span>Help & Guidance</span>
+          <i data-lucide="chevron-right" class="nav-chevron"></i>
+        </button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="help-card">
+          <strong>Need assistance?</strong>
+          <p>New to hands-free tracking? Follow our quick 5-step tutorial.</p>
+          <button onclick="setPage('help')">
+            Setup guide <i data-lucide="arrow-up-right"></i>
+          </button>
+        </div>
+        <div class="profile-card">
+          <div class="avatar" id="sidebar-avatar">N</div>
+          <div>
+            <strong id="sidebar-profile-name">My Workspace</strong>
+            <small>Active Profile</small>
+          </div>
+          <button onclick="setPage('settings')" title="Personalisation" style="color:var(--text-muted);">
+            <i data-lucide="settings-2" style="width:17px;height:17px;"></i>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN AREA -->
+    <main class="main-area">
+      <!-- TOPBAR -->
+      <header class="topbar">
+        <div class="breadcrumb">
+          <span>Workspace</span>
+          <i data-lucide="chevron-right" style="width: 14px; height: 14px;"></i>
+          <strong id="topbar-current-page">Dashboard</strong>
+        </div>
+        <div class="top-actions">
+          <!-- Voice Interactive Cursor Command Pill -->
+          <button class="voice-command-pill" id="voice-command-pill" onclick="toggleVoiceCommandListener()" title="Say 'Hey Cursor' then 'Point towards...' to navigate hands-free">
+            <span class="voice-mic-wave"></span>
+            <i data-lucide="mic" style="width: 14px; height: 14px;"></i>
+            <span id="voice-command-status">"Hey Cursor" Ready</span>
+          </button>
+
+          <!-- Master Head Mouse Toggle -->
+          <button class="head-control-toggle-btn" id="head-mouse-toggle-btn" onclick="toggleHeadMouseControl()" title="Toggle hands-free head movement mouse control">
+            <i data-lucide="scan-face" style="width: 15px; height: 15px;"></i>
+            <span id="head-mouse-status-text">Head Mouse: OFF</span>
+          </button>
+
+          <div class="status-badge" id="camera-status-pill">
+            <span class="status-dot" id="status-dot-indicator"></span>
+            <span id="system-status-text">Vision: Standby</span>
+          </div>
+
+          <!-- Theme Toggle (Light / Dark) -->
+          <button class="icon-btn" id="theme-toggle-btn" onclick="toggleDarkMode()" title="Toggle Light / Dark mode" aria-label="Toggle theme">
+            <i data-lucide="moon" id="theme-icon"></i>
+          </button>
+
+          <!-- Notification Bell -->
+          <button class="icon-btn" id="bell-btn" title="Notifications" aria-label="Notifications" onclick="triggerNotificationToast()">
+            <i data-lucide="bell"></i>
+          </button>
+
+          <div class="avatar" id="topbar-avatar" style="width: 34px; height: 34px; font-size: 0.85rem;">N</div>
+        </div>
+      </header>
+
+      <!-- DYNAMIC CONTENT -->
+      <div class="content" id="app-content">
+        <!-- Rendered dynamically by app.js -->
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
