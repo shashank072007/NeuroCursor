@@ -1,6 +1,5 @@
 # NeuroCursor (FLUX) — Assistive Hands-Free Interface & OS Controller
 
-> **Unified Integration Branch (`integration`)**  
 > An adaptive, accessible hands-free platform that bridges **computer vision head tracking**, an **intelligent intent & fatigue adaptation backend**, and a modern **interactive web UI suite**.
 
 ---
@@ -59,13 +58,60 @@
 
 ## 3. Quickstart
 
-### Prerequisites
-- Python 3.10+
-- Webcam (for live tracking mode)
+### First-time setup on another laptop
 
-```bash
-pip install -r requirements.txt
-```
+The steps below use the GitHub `test1` branch, which contains the integrated Python camera pipeline and cursor controls. Each laptop needs its own camera calibration; the generated `calibration.json` is intentionally local and is not shared through GitHub.
+
+1. Install **Git**, **Python 3.10 or newer**, and a webcam. Install Chrome or Edge if you plan to use speech commands.
+
+2. Clone the branch and enter the project directory:
+
+   ```bash
+   git clone --branch test1 --single-branch https://github.com/shashank072007/NeuroCursor.git
+   cd NeuroCursor
+   ```
+
+3. Create and activate a virtual environment, then install the Python packages.
+
+   **Windows PowerShell:**
+
+   ```powershell
+   py -3 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+   ```
+
+   **macOS / Linux:**
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+   ```
+
+4. Close other apps using the webcam, then launch a safe first run:
+
+   ```bash
+   python main.py --source live --camera-index 0 --simulate --open-browser
+   ```
+
+   If camera index `0` is unavailable, stop the app with **Ctrl+C** and retry with `--camera-index 1`. The browser page is `http://127.0.0.1:5000/`; the camera preview should say **Python Vision Live**. Grant camera permission to Python/the terminal in the operating system if prompted. The browser itself does not access the webcam.
+
+5. In the app, open **Live Cursor Control** and select **5-Point Calibration**. Follow the prompts: neutral pose, comfortable right, left, up, and down positions. Keep your face visible and hold each pose until the next prompt. The calibration is saved locally for that laptop.
+
+6. Try **Head + gestures** with `--simulate` still enabled. Smile or left wink performs a left click; mouth open or right wink performs a right click. The green dwell circle also performs one in-app left click when it completes. Move away from a target to rearm dwell clicking.
+
+7. To enable native desktop cursor control on a supported system, stop the app with **Ctrl+C** and restart without `--simulate`:
+
+   ```bash
+   python main.py --source live --camera-index 0 --open-browser
+   ```
+
+8. To use speech, click **Voice: Off**, allow microphone access for `127.0.0.1`, then say **“Hey Cursor”** followed by a command. In **Head + speech** mode, choose which input has priority.
+
+**Platform notes:** Windows 10/11 is the primary desktop-control target. On macOS, grant camera and Accessibility permissions to the terminal/Python. On Linux, the camera may require access to `/dev/video0`, and native mouse control can depend on the desktop session (X11/Wayland). The in-browser controls can be used with a supported browser even when native desktop permissions are unavailable.
 
 ### Running the Application
 
@@ -154,7 +200,7 @@ Or with unittest:
 ```bash
 python -m unittest discover tests
 ```
-All 48 tests validate:
+The test suite validates:
 1. REST endpoints, token auth, CORS headers, and frontend asset delivery.
 2. Dual schema normalization bridging Vision (`pointer`, `raw_motion`, `detected`) and Backend (`head`, `face.detected`, `ts`).
 3. Landmark quality gating and strict null-out fail-safes.
