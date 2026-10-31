@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "profile_id": "test_calib_user",
+  "created": "2026-10-31T20:47:00.386959+05:30",
+  "neutral": {
+    "x": 0.5,
+    "y": 0.5,
+    "face_width_px": 212
+  },
+  "range": {
+    "x": 0.176,
+    "y": 0.128
+  },
+  "baseline": {
+    "jitter": 0.004,
+    "gesture_peak": 0.92,
+    "hold_ms": 190
+  },
+  "gesture_map": {
+    "mouth_open": "left_click",
+    "brow_raise": "scroll_toggle",
+    "smile": "menu_open"
+  },
+  "gesture_thresholds": {
+    "mouth_open": 0.55,
+    "brow_raise": 0.55,
+    "smile": 0.55
+  },
+  "sound": {
+    "enabled": false,
+    "template": null
+  }
+}

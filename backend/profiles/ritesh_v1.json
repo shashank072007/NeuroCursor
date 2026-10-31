@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "profile_id": "ritesh_v1",
+  "created": "2026-10-31T11:40:00+05:30",
+  "neutral": {
+    "x": 0.5,
+    "y": 0.5,
+    "face_width_px": 212
+  },
+  "range": {
+    "x": 0.18,
+    "y": 0.12
+  },
+  "baseline": {
+    "jitter": 0.004,
+    "gesture_peak": 0.91,
+    "hold_ms": 180
+  },
+  "gesture_map": {
+    "mouth_open": "left_click",
+    "brow_raise": "scroll_toggle",
+    "smile": "menu_open"
+  },
+  "gesture_thresholds": {
+    "mouth_open": 0.55,
+    "brow_raise": 0.6,
+    "smile": 0.5
+  },
+  "sound": {
+    "enabled": false,
+    "template": null
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "model_profile": "balanced",
+  "commit_docs": true,
+  "search_gitignored": false,
+  "parallelization": false,
+  "verifier": true,
+  "context_window": 200000,
+  "git": {
+    "branching_strategy": "none"
+  }
+}

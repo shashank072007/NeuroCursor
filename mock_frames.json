@@ -1,0 +1,263 @@
+[
+  {
+    "frame_index": 1,
+    "timestamp": 1730370000.000,
+    "detected": true,
+    "face": {
+      "quality": 0.95,
+      "width_norm": 0.36
+    },
+    "pointer": {
+      "nx": 0.500,
+      "ny": 0.500
+    },
+    "raw_motion": {
+      "raw_dx": 0.000,
+      "raw_dy": 0.000
+    },
+    "gesture": {
+      "name": "none",
+      "score": 0.00,
+      "held_ms": 0
+    },
+    "timing": {
+      "capture_ms": 3.4,
+      "process_ms": 11.2,
+      "fps": 29.5
+    }
+  },
+  {
+    "frame_index": 2,
+    "timestamp": 1730370000.033,
+    "detected": true,
+    "face": {
+      "quality": 0.94,
+      "width_norm": 0.36
+    },
+    "pointer": {
+      "nx": 0.504,
+      "ny": 0.498
+    },
+    "raw_motion": {
+      "raw_dx": 0.005,
+      "raw_dy": -0.002
+    },
+    "gesture": {
+      "name": "none",
+      "score": 0.00,
+      "held_ms": 0
+    },
+    "timing": {
+      "capture_ms": 3.6,
+      "process_ms": 11.0,
+      "fps": 29.8
+    }
+  },
+  {
+    "frame_index": 3,
+    "timestamp": 1730370000.067,
+    "detected": true,
+    "face": {
+      "quality": 0.95,
+      "width_norm": 0.36
+    },
+    "pointer": {
+      "nx": 0.510,
+      "ny": 0.495
+    },
+    "raw_motion": {
+      "raw_dx": 0.008,
+      "raw_dy": -0.004
+    },
+    "gesture": {
+      "name": "none",
+      "score": 0.00,
+      "held_ms": 0
+    },
+    "timing": {
+      "capture_ms": 3.5,
+      "process_ms": 10.9,
+      "fps": 30.1
+    }
+  },
+  {
+    "frame_index": 4,
+    "timestamp": 1730370000.100,
+    "detected": true,
+    "face": {
+      "quality": 0.92,
+      "width_norm": 0.35
+    },
+    "pointer": {
+      "nx": 0.620,
+      "ny": 0.410
+    },
+    "raw_motion": {
+      "raw_dx": 0.145,
+      "raw_dy": -0.110
+    },
+    "gesture": {
+      "name": "none",
+      "score": 0.00,
+      "held_ms": 0
+    },
+    "timing": {
+      "capture_ms": 3.8,
+      "process_ms": 11.4,
+      "fps": 29.4
+    }
+  },
+  {
+    "frame_index": 5,
+    "timestamp": 1730370000.133,
+    "detected": true,
+    "face": {
+      "quality": 0.91,
+      "width_norm": 0.35
+    },
+    "pointer": {
+      "nx": 0.725,
+      "ny": 0.345
+    },
+    "raw_motion": {
+      "raw_dx": 0.280,
+      "raw_dy": -0.190
+    },
+    "gesture": {
+      "name": "none",
+      "score": 0.00,
+      "held_ms": 0
+    },
+    "timing": {
+      "capture_ms": 3.7,
+      "process_ms": 11.8,
+      "fps": 29.0
+    }
+  },
+  {
+    "frame_index": 6,
+    "timestamp": 1730370000.167,
+    "detected": true,
+    "face": {
+      "quality": 0.89,
+      "width_norm": 0.35
+    },
+    "pointer": {
+      "nx": 0.730,
+      "ny": 0.340
+    },
+    "raw_motion": {
+      "raw_dx": 0.285,
+      "raw_dy": -0.195
+    },
+    "gesture": {
+      "name": "mouth_open",
+      "score": 0.82,
+      "held_ms": 120
+    },
+    "timing": {
+      "capture_ms": 4.1,
+      "process_ms": 12.1,
+      "fps": 28.5
+    }
+  },
+  {
+    "frame_index": 7,
+    "timestamp": 1730370000.200,
+    "detected": true,
+    "face": {
+      "quality": 0.88,
+      "width_norm": 0.35
+    },
+    "pointer": {
+      "nx": 0.728,
+      "ny": 0.342
+    },
+    "raw_motion": {
+      "raw_dx": 0.282,
+      "raw_dy": -0.192
+    },
+    "gesture": {
+      "name": "mouth_open",
+      "score": 0.89,
+      "held_ms": 250
+    },
+    "timing": {
+      "capture_ms": 3.9,
+      "process_ms": 11.9,
+      "fps": 28.9
+    }
+  },
+  {
+    "frame_index": 8,
+    "timestamp": 1730370000.233,
+    "detected": true,
+    "face": {
+      "quality": 0.90,
+      "width_norm": 0.36
+    },
+    "pointer": {
+      "nx": 0.680,
+      "ny": 0.380
+    },
+    "raw_motion": {
+      "raw_dx": 0.210,
+      "raw_dy": -0.140
+    },
+    "gesture": {
+      "name": "wink_left",
+      "score": 0.91,
+      "held_ms": 180
+    },
+    "timing": {
+      "capture_ms": 3.8,
+      "process_ms": 11.5,
+      "fps": 29.1
+    }
+  },
+  {
+    "frame_index": 9,
+    "timestamp": 1730370000.267,
+    "detected": false,
+    "face": null,
+    "pointer": null,
+    "raw_motion": null,
+    "gesture": {
+      "name": "none",
+      "score": 0.00,
+      "held_ms": 0
+    },
+    "timing": {
+      "capture_ms": 3.5,
+      "process_ms": 4.2,
+      "fps": 29.6
+    }
+  },
+  {
+    "frame_index": 10,
+    "timestamp": 1730370000.300,
+    "detected": true,
+    "face": {
+      "quality": 0.91,
+      "width_norm": 0.36
+    },
+    "pointer": {
+      "nx": 0.520,
+      "ny": 0.485
+    },
+    "raw_motion": {
+      "raw_dx": 0.015,
+      "raw_dy": -0.010
+    },
+    "gesture": {
+      "name": "none",
+      "score": 0.00,
+      "held_ms": 0
+    },
+    "timing": {
+      "capture_ms": 3.6,
+      "process_ms": 11.3,
+      "fps": 29.4
+    }
+  }
+]
