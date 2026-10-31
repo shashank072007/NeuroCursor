@@ -404,7 +404,20 @@ input:focus-visible {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  transform: none;
+  transition: transform var(--transition-fast);
+}
+.pip-camera-box.mirrored video,
+.pip-camera-box.mirrored img {
   transform: scaleX(-1);
+}
+.pip-camera-box.flipped-v video,
+.pip-camera-box.flipped-v img {
+  transform: scaleY(-1);
+}
+.pip-camera-box.mirrored.flipped-v video,
+.pip-camera-box.mirrored.flipped-v img {
+  transform: scaleX(-1) scaleY(-1);
 }
 .pip-badge {
   position: absolute;
@@ -1269,8 +1282,18 @@ body.dark-mode .cursor-canvas-zone {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transform: scaleX(-1);
+  transform: none;
   display: block;
+  transition: transform var(--transition-fast);
+}
+.webcam-video.mirrored {
+  transform: scaleX(-1);
+}
+.webcam-video.flipped-v {
+  transform: scaleY(-1);
+}
+.webcam-video.mirrored.flipped-v {
+  transform: scaleX(-1) scaleY(-1);
 }
 
 .webcam-mesh-canvas {
@@ -1280,6 +1303,17 @@ body.dark-mode .cursor-canvas-zone {
   width: 100%;
   height: 100%;
   pointer-events: none;
+  transform: none;
+  transition: transform var(--transition-fast);
+}
+.webcam-mesh-canvas.mirrored {
+  transform: scaleX(-1);
+}
+.webcam-mesh-canvas.flipped-v {
+  transform: scaleY(-1);
+}
+.webcam-mesh-canvas.mirrored.flipped-v {
+  transform: scaleX(-1) scaleY(-1);
 }
 
 .webcam-hud {
@@ -1947,5 +1981,33 @@ body.dark-mode .studio-canvas-zone {
   0% { transform: scale(1); box-shadow: 0 0 0 rgba(36, 169, 138, 0.9); }
   35% { transform: scale(1.04); box-shadow: 0 0 28px rgba(36, 169, 138, 0.7); }
   100% { transform: scale(1); box-shadow: 0 0 8px rgba(36, 169, 138, 0.2); }
+}
+
+
+
+/* Gesture click highlight & Interim Speech UI */
+
+.gesture-target-highlight {
+
+  outline: 3px solid var(--mint-teal) !important;
+
+  box-shadow: 0 0 24px var(--mint-teal-glow) !important;
+
+  transform: scale(1.02) !important;
+
+  transition: all 0.18s ease-out !important;
+
+}
+
+
+
+.interim-speech-live {
+
+  color: var(--primary-blue);
+
+  font-style: italic;
+
+  opacity: 0.85;
+
 }
 

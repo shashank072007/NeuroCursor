@@ -110,14 +110,41 @@ python -m http.server 5173
 |---|---|---|
 | **F9** | Backend Safety | Toggle **Pause / Resume** (pointer tracks, clicks disabled) |
 | **F10** | Backend Safety | Toggle **Lock / Unlock** (cursor and clicks disabled) |
-| **Smile** | Vision / Guard | Left Click / Selection Trigger |
-| **Mouth Open** | Vision / Guard | Context Action / Click Trigger |
+| **Smile** | Vision / Guard | Left Click / Primary Option Selection (debounced 550ms) |
+| **Mouth Open** | Vision / Guard | Context Action / Right Click Trigger |
+| **Eyebrows Raise**| Vision / Frontend | Hands-free cursor pause / resume toggle |
+| **Dwell Hover** | Frontend Engine | Anchor-based 38px radius hands-free click with radial progress ring |
 | **"Hey Cursor"** | Frontend Voice | Activates voice-directed smooth navigation |
+| **"Click [Option]"**| Frontend Voice | Directly targets and activates interactive UI controls |
+| **Flip / Mirror** | Frontend Vision | Quick toggle between standard (non-inverted) & mirrored webcam feed |
 | **OS Mouse Toggle** | Frontend / API | Switches OS native cursor control via `/resume` and `/pause` |
 
 ---
 
-## 5. Verification & Testing
+## 5. Fine-Tuned Ergonomics & Speech-to-Text Optimizations
+
+1. **Non-Inverted Webcam Feed & Quick Toggles:**
+   - Laptop webcam video feeds render in their natural, un-inverted orientation by default.
+   - Quick one-click "Flip / Mirror" and "Invert V" toggles are available directly in the Live Camera HUD and Personalisation settings, persisting preferences to `localStorage`.
+   - The landmark mesh overlay dynamically matches CSS transforms for 1:1 face alignment.
+
+2. **Precision Navigation & Anchor-Based Dwell Click:**
+   - **Asymmetric Gain:** 1.35x vertical scaling compensates for human pitch range vs yaw neck rotation, making top and bottom screen targets effortless to reach.
+   - **Fixation Deadzone (0.0035):** Prevents micro-tremors from disturbing button targeting.
+   - **Velocity-Adaptive Smoothing:** Automatically provides high responsiveness during sweeping motions and steady low-jitter stability during fixation.
+   - **Anchor Dwell Engine:** Progresses within a 38px anchor circle, eliminating drift-resets.
+   - **Interactive Target Resolution:** Ensures clicking inner icons or text spans accurately triggers the parent button or card action.
+
+3. **Optimized Speech-to-Text Conversion:**
+   - **Live Interim Preview:** Real-time visual feedback renders interim spoken phrases in styled italic preview before committing finalized text.
+   - **Spoken Punctuation Normalization:** Automatically converts verbalized punctuation ("question mark", "period", "comma", "exclamation point", "new line") to proper symbols and capitalizes sentence beginnings.
+   - **Acoustic Noise Filtering:** Low-confidence background acoustic noise (< 0.40) is ignored to prevent hallucinated words.
+   - **Continuous Reconnection:** Automatically resumes recognition across pauses without silent dropouts.
+   - **Expanded Voice Intent Dictionary:** Direct "Click [target]" or "Select [option]" voice commands automatically glide the cursor and trigger selection.
+
+---
+
+## 6. Verification & Testing
 
 Execute the complete end-to-end integration test suite:
 ```bash

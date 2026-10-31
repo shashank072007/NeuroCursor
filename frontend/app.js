@@ -50,7 +50,12 @@ const state = {
   
   // Calibration baseline anchor
   neutralNoseX: 0.5,
-  neutralNoseY: 0.45
+  neutralNoseY: 0.45,
+
+  // Camera orientation configuration (default false: standard un-inverted view)
+  mirrorVideo: localStorage.getItem("neuro_mirror_video") === "true",
+  flipVVideo: localStorage.getItem("neuro_flipv_video") === "true",
+  interimTranscription: ""
 };
 
 const pageTitles = {
@@ -173,10 +178,13 @@ let videoElement = null;
 // Dwell selection kinematics & Gesture debouncing
 let lastCursorX = 0;
 let lastCursorY = 0;
+let dwellAnchorX = 0;
+let dwellAnchorY = 0;
 let dwellTimeAccumulated = 0;
-const DWELL_RADIUS_THRESHOLD = 32; // Pixels
+const DWELL_RADIUS_THRESHOLD = 38; // Pixels (tolerance for comfortable resting fixation)
 let lastFrameTime = performance.now();
 let lastGestureClickTime = 0;
+let lastDwellClickTime = 0;
 let lastEyebrowToggleTime = 0;
 let globalStream = null;
 let gestureToastTimer = null;
@@ -331,6 +339,42 @@ function toggleOSMouseControl() {
 }
 
 
+// Apply horizontal mirror & vertical inversion transforms to video feeds & mesh canvas
+function applyWebcamTransforms() {
+  const targets = [
+    document.getElementById("live-webcam-element"),
+    document.getElementById("vision-canvas"),
+    document.getElementById("persistent-webcam"),
+    document.getElementById("pip-camera-container")
+  ];
+  targets.forEach(el => {
+    if (!el) return;
+    if (state.mirrorVideo) el.classList.add("mirrored");
+    else el.classList.remove("mirrored");
+
+    if (state.flipVVideo) el.classList.add("flipped-v");
+    else el.classList.remove("flipped-v");
+  });
+}
+
+function toggleWebcamMirror() {
+  state.mirrorVideo = !state.mirrorVideo;
+  try { localStorage.setItem("neuro_mirror_video", state.mirrorVideo ? "true" : "false"); } catch (e) {}
+  applyWebcamTransforms();
+  playSound("click");
+  showGestureToast(state.mirrorVideo ? "Webcam Mirrored (Flip Horizontal)" : "Webcam Standard (Non-Inverted)");
+  renderView();
+}
+
+function toggleWebcamFlipV() {
+  state.flipVVideo = !state.flipVVideo;
+  try { localStorage.setItem("neuro_flipv_video", state.flipVVideo ? "true" : "false"); } catch (e) {}
+  applyWebcamTransforms();
+  playSound("click");
+  showGestureToast(state.flipVVideo ? "Webcam Inverted Vertically" : "Webcam Standard Vertical");
+  renderView();
+}
+
 // Synchronize webcam video element and PiP stream
 function syncWebcamVideoStreams() {
   const visibleVid = document.getElementById("live-webcam-element");
@@ -348,6 +392,7 @@ function syncWebcamVideoStreams() {
       pipVid.play().catch(() => {});
     }
   }
+  applyWebcamTransforms();
 }
 
 // Initialize Camera & MediaPipe FaceMesh
@@ -483,18 +528,28 @@ function onFaceMeshResults(results) {
   const leftEyeUpper = landmarks[159];
   const rightEyeUpper = landmarks[386];
 
-  // Head Movement Offsets (Mirrored for intuitive gaze control)
+  // Head Movement Offsets (relative to calibrated neutral center)
   const dx = (noseTip.x - state.neutralNoseX);
   const dy = (noseTip.y - state.neutralNoseY);
 
   state.rawDx = dx;
   state.rawDy = dy;
 
-  const gain = (state.sensitivity / 100.0) * 3.8 + 1.2;
-  const rawNx = Math.max(0.01, Math.min(0.99, 0.5 - (dx * gain)));
-  const rawNy = Math.max(0.01, Math.min(0.99, 0.5 + (dy * gain)));
+  // Ergonomic deadzone filters involuntary micro-tremors without sticking
+  const deadzone = 0.0035;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+  const effDx = absDx > deadzone ? Math.sign(dx) * Math.pow((absDx - deadzone) / (1.0 - deadzone), 0.92) : 0;
+  const effDy = absDy > deadzone ? Math.sign(dy) * Math.pow((absDy - deadzone) / (1.0 - deadzone), 0.92) : 0;
 
-  // Gesture Detection
+  // Asymmetric gain scaling: human neck pitch has ~35% smaller physical range than yaw rotation
+  const gainX = 2.4 + (state.sensitivity / 100.0) * 4.6;
+  const gainY = gainX * 1.35;
+
+  const rawNx = Math.max(0.01, Math.min(0.99, 0.5 - (effDx * gainX)));
+  const rawNy = Math.max(0.01, Math.min(0.99, 0.5 + (effDy * gainY)));
+
+  // Gesture Detection & Natural Expression Scoring
   let detectedGesture = "none";
   let gestureScore = 0.0;
 
@@ -506,19 +561,23 @@ function onFaceMeshResults(results) {
   const mouthWidth = Math.hypot(leftMouth.x - rightMouth.x, leftMouth.y - rightMouth.y);
   const smileRatio = mouthWidth / eyeDist;
 
+  // Mouth corner elevation to capture natural, comfortable smiles
+  const mouthCenterY = (topLip.y + bottomLip.y) / 2.0;
+  const cornerElevation = ((mouthCenterY - leftMouth.y) + (mouthCenterY - rightMouth.y)) / (2.0 * faceHeight);
+
   const browDist = ((leftEyeUpper.y - leftEyebrow.y) + (rightEyeUpper.y - rightEyebrow.y)) / 2.0;
   const browRatio = browDist / faceHeight;
 
-  // Prioritize Eyebrow Raise (Pause/Disable) -> Smile (Left Click) -> Mouth Open (Right Click)
-  if (browRatio > 0.115) {
+  // Fine-tuned thresholds for natural interaction without muscular strain:
+  if (browRatio > 0.098) {
     detectedGesture = "eyebrow_raise";
-    gestureScore = Math.min(1.0, (browRatio - 0.115) / 0.05 + 0.65);
-  } else if (smileRatio > 0.86) {
+    gestureScore = Math.min(1.0, (browRatio - 0.098) / 0.04 + 0.65);
+  } else if (smileRatio > 0.80 || (smileRatio > 0.77 && cornerElevation > 0.012)) {
     detectedGesture = "smile";
-    gestureScore = Math.min(1.0, (smileRatio - 0.86) / 0.18 + 0.65);
-  } else if (mouthOpenRatio > 0.16) {
+    gestureScore = Math.min(1.0, (smileRatio - 0.77) / 0.12 + 0.65);
+  } else if (mouthOpenRatio > 0.11) {
     detectedGesture = "mouth_open";
-    gestureScore = Math.min(1.0, (mouthOpenRatio - 0.16) / 0.14 + 0.60);
+    gestureScore = Math.min(1.0, (mouthOpenRatio - 0.11) / 0.10 + 0.60);
   }
 
   updateTrackingKinematics(rawNx, rawNy, detectedGesture, gestureScore);
@@ -566,8 +625,10 @@ function updateTrackingKinematics(targetNx, targetNy, gesture, score) {
     return;
   }
 
-  // Low-pass exponential smoothing filter
-  const alpha = 0.22 + (state.sensitivity / 100) * 0.15;
+  // Velocity-adaptive low-pass smoothing:
+  // Higher alpha during fast head motion for instant response; lower alpha during fixation for zero-jitter aiming
+  const moveDist = Math.hypot(targetNx - state.smoothNx, targetNy - state.smoothNy);
+  const alpha = moveDist > 0.015 ? 0.36 + (state.sensitivity / 100) * 0.18 : 0.18 + (state.sensitivity / 100) * 0.10;
   state.smoothNx = state.smoothNx * (1 - alpha) + targetNx * alpha;
   state.smoothNy = state.smoothNy * (1 - alpha) + targetNy * alpha;
 
@@ -597,13 +658,13 @@ function updateTrackingKinematics(targetNx, targetNy, gesture, score) {
     handleHeadStudioDrawing(screenX, screenY);
   }
 
-  // 5. Dwell Selection Engine
-  const dt = (now - lastFrameTime) / 1000.0;
+  // 5. Stable Anchor-Based Dwell Selection Engine
+  const dt = Math.min(0.1, (now - lastFrameTime) / 1000.0);
   lastFrameTime = now;
 
-  const distFromLast = Math.hypot(screenX - lastCursorX, screenY - lastCursorY);
+  const distFromAnchor = Math.hypot(screenX - dwellAnchorX, screenY - dwellAnchorY);
 
-  if (distFromLast < DWELL_RADIUS_THRESHOLD) {
+  if (distFromAnchor < DWELL_RADIUS_THRESHOLD) {
     dwellTimeAccumulated += dt;
     const progress = Math.min(1.0, dwellTimeAccumulated / state.dwell);
 
@@ -614,12 +675,18 @@ function updateTrackingKinematics(targetNx, targetNy, gesture, score) {
       bar.style.strokeDashoffset = offset;
     }
 
-    if (dwellTimeAccumulated >= state.dwell && (now - lastGestureClickTime > 650)) {
+    if (dwellTimeAccumulated >= state.dwell && (now - lastDwellClickTime > 600)) {
       executeClickAt(screenX, screenY, "left", "Dwell Selection");
+      lastDwellClickTime = now;
       dwellTimeAccumulated = 0;
+      dwellAnchorX = screenX;
+      dwellAnchorY = screenY;
       if (bar) bar.style.strokeDashoffset = 157;
     }
   } else {
+    // Cursor moved outside dwell target zone: establish new dwell anchor
+    dwellAnchorX = screenX;
+    dwellAnchorY = screenY;
     dwellTimeAccumulated = 0;
     const bar = document.getElementById("dwell-progress-bar");
     if (bar) bar.style.strokeDashoffset = 157;
@@ -628,29 +695,38 @@ function updateTrackingKinematics(targetNx, targetNy, gesture, score) {
   lastCursorX = screenX;
   lastCursorY = screenY;
 
-  // 6. Facial Gestures Execution
-  // Smile -> Left Click / Select
-  if (gesture === "smile" && score > 0.70 && (now - lastGestureClickTime > 750)) {
+  // 6. Facial Gestures Execution (Fine-tuned for responsive clicking of options/buttons)
+  // Smile -> Primary Click / Select Option
+  if (gesture === "smile" && score >= 0.65 && (now - lastGestureClickTime > 550)) {
     executeClickAt(screenX, screenY, "left", "Smile (Select)");
-    showGestureToast("😊 SMILE: Left Click (Select)");
+    showGestureToast("😊 SMILE: Option Selected");
     lastGestureClickTime = now;
   }
-  // Open Mouth -> Right Click / Select
-  else if (gesture === "mouth_open" && score > 0.75 && (now - lastGestureClickTime > 750)) {
+  // Open Mouth -> Secondary Context Click / Options Menu
+  else if (gesture === "mouth_open" && score >= 0.62 && (now - lastGestureClickTime > 550)) {
     executeClickAt(screenX, screenY, "right", "Mouth Open (Right Click)");
-    showGestureToast("😮 MOUTH OPEN: Right Click");
+    showGestureToast("😮 MOUTH OPEN: Context Action");
     lastGestureClickTime = now;
   }
 }
 
-// Execute synthetic click on UI element under pointer
+// Execute synthetic click on UI element under pointer with intelligent interactive ancestor resolution
 function executeClickAt(x, y, button = "left", source = "Head Cursor") {
   const globalCursor = document.getElementById("global-head-cursor");
-  if (globalCursor) globalCursor.classList.add("clicking");
-  if (globalCursor) globalCursor.style.pointerEvents = "none";
+  if (globalCursor) {
+    globalCursor.classList.add("clicking");
+    globalCursor.style.pointerEvents = "none";
+  }
 
-  const target = document.elementFromPoint(x, y);
-  if (target) {
+  const rawTarget = document.elementFromPoint(x, y);
+  if (rawTarget) {
+    // Resolve nearest interactive target so child icons, spans, and labels activate their parent button/card
+    const target = rawTarget.closest('button, a, input, select, textarea, [role="button"], [onclick], .interactive, .toggle, .toggle-row, .card-panel, .nav-item, .suggestion-chip, .key-btn, .calib-target') || rawTarget;
+
+    // Transient visual feedback highlight
+    target.classList.add("gesture-target-highlight");
+    setTimeout(() => target.classList.remove("gesture-target-highlight"), 350);
+
     if (button === "left") {
       target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
       target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
@@ -703,7 +779,7 @@ function drawVisionLandmarkMesh(landmarks) {
   ctx.lineWidth = 1;
 
   const nose = landmarks[4];
-  const nx = (1 - nose.x) * w;
+  const nx = nose.x * w;
   const ny = nose.y * h;
 
   ctx.beginPath();
@@ -715,7 +791,7 @@ function drawVisionLandmarkMesh(landmarks) {
 
   [33, 133, 362, 263].forEach(idx => {
     const pt = landmarks[idx];
-    const px = (1 - pt.x) * w;
+    const px = pt.x * w;
     const py = pt.y * h;
     ctx.beginPath();
     ctx.arc(px, py, 3, 0, Math.PI * 2);
@@ -726,7 +802,7 @@ function drawVisionLandmarkMesh(landmarks) {
   ctx.beginPath();
   [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291].forEach((idx, i) => {
     const pt = landmarks[idx];
-    const px = (1 - pt.x) * w;
+    const px = pt.x * w;
     const py = pt.y * h;
     if (i === 0) ctx.moveTo(px, py);
     else ctx.lineTo(px, py);
@@ -1303,6 +1379,22 @@ function matchFeatureIntent(cleanQuery) {
 function processVoiceInstruction(phrase) {
   console.log("[Process Voice Instruction]:", phrase);
 
+  // Video mirror toggle voice commands
+  if (phrase.includes("mirror video") || phrase.includes("flip video") || phrase.includes("invert video") || phrase.includes("mirror camera")) {
+    toggleWebcamMirror();
+    return;
+  }
+
+  // Direct action command pattern: "click [target]" or "select [target]"
+  const actionTargetMatch = phrase.match(/^(?:click|select|choose|tap|press|hit)\s+(.+)$/i);
+  if (actionTargetMatch) {
+    const candidate = actionTargetMatch[1].trim();
+    if (candidate && !/^(that|it|here|now|this)$/i.test(candidate)) {
+      executePointCommand(candidate, true, phrase);
+      return;
+    }
+  }
+
   // A. Pointing and Navigation commands
   const pointTriggers = /(?:point\s+(?:towards|to|at)|go\s+to|move\s+to|navigate\s+to|look\s+at|aim\s+at|focus\s+on|take\s+me\s+to|show\s+me|target)\s+/i;
   
@@ -1780,7 +1872,9 @@ function renderView() {
             <canvas class="webcam-mesh-canvas" id="vision-canvas"></canvas>
             <div class="webcam-hud">
               <span class="hud-pill"><i data-lucide="eye" style="width:12px;display:inline;"></i> GAZE ACTIVE</span>
-              <span class="hud-pill" style="color:var(--mint-teal);"><i data-lucide="check-circle" style="width:12px;display:inline;"></i> TRACKING 99%</span>
+              <button class="hud-pill" style="cursor:pointer; background:rgba(15,23,42,0.82); border:1px solid rgba(255,255,255,0.2); color:#fff;" onclick="toggleWebcamMirror()" title="Toggle Video Mirror">
+                <i data-lucide="flip-horizontal" style="width:12px;display:inline;"></i> ${state.mirrorVideo ? 'MIRRORED' : 'NORMAL (NON-INVERTED)'}
+              </button>
             </div>
           </div>
 
@@ -1799,9 +1893,15 @@ function renderView() {
             </div>
           </div>
 
-          <div style="display: flex; gap: 10px; margin-top: 16px;">
-            <button id="btn-connect-webcam" class="primary-btn full-btn teal-btn" onclick="${state.cameraActive ? 'stopCameraVision()' : 'startCameraVision()'}">
+          <div style="display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap;">
+            <button id="btn-connect-webcam" class="primary-btn teal-btn" style="flex: 1;" onclick="${state.cameraActive ? 'stopCameraVision()' : 'startCameraVision()'}">
               <i data-lucide="camera"></i> ${state.cameraActive ? 'Disconnect Camera' : 'Connect Live Webcam'}
+            </button>
+            <button id="btn-toggle-mirror" class="secondary-btn" onclick="toggleWebcamMirror()" title="Toggle Horizontal Mirroring">
+              <i data-lucide="flip-horizontal"></i> ${state.mirrorVideo ? 'Mirror: ON' : 'Normal Feed'}
+            </button>
+            <button id="btn-toggle-flipv" class="secondary-btn" onclick="toggleWebcamFlipV()" title="Toggle Vertical Inversion">
+              <i data-lucide="flip-vertical"></i> ${state.flipVVideo ? 'Flip V: ON' : 'Flip V'}
             </button>
             <button id="btn-5point-calib" class="secondary-btn" onclick="startCalibration()">
               <i data-lucide="target"></i> 5-Point Calibration
@@ -2133,6 +2233,16 @@ function renderView() {
           </h4>
 
           <div class="toggle-row">
+            <div><strong>Mirror Webcam Feed (Flip Horizontal)</strong><small>Toggle horizontal flip if your camera requires mirroring</small></div>
+            <button id="toggle-mirror-video" class="toggle ${state.mirrorVideo ? 'toggle-on' : ''}" onclick="toggleWebcamMirror()" role="switch"><span></span></button>
+          </div>
+
+          <div class="toggle-row">
+            <div><strong>Invert Vertical Webcam (Flip Vertical)</strong><small>Flip camera vertically if camera mount is inverted</small></div>
+            <button id="toggle-flipv-video" class="toggle ${state.flipVVideo ? 'toggle-on' : ''}" onclick="toggleWebcamFlipV()" role="switch"><span></span></button>
+          </div>
+
+          <div class="toggle-row">
             <div><strong>High Contrast Mode</strong><small>Sharpen text and border readability</small></div>
             <button id="toggle-high-contrast" class="toggle ${state.highContrast ? 'toggle-on' : ''}" onclick="toggleSettingKey('highContrast')" role="switch"><span></span></button>
           </div>
@@ -2161,11 +2271,11 @@ function renderView() {
 
           <div style="display: flex; flex-direction: column; gap: 10px;">
             ${[
-              { gesture: "Smile / Grin (> 86%)", action: "Left Primary Click / Select" },
-              { gesture: "Mouth Open (> 16%)", action: "Right Click / Context Select" },
+              { gesture: "Smile / Grin (Natural > 77%)", action: "Left Primary Click / Select Option" },
+              { gesture: "Mouth Open (Natural > 11%)", action: "Right Click / Context Actions" },
               { gesture: "Eyebrow Raise", action: "Pause / Resume Cursor Movement" },
-              { gesture: "Head Movement", action: "Nose Tip Continuous Cursor Drive" },
-              { gesture: "Dwell Hover (1.2s)", action: "Hands-Free Auto-Click" }
+              { gesture: "Head Movement", action: "Nose Tip Precision Cursor Drive" },
+              { gesture: "Dwell Hover (1.2s)", action: "Hands-Free Auto-Click with Progress Ring" }
             ].map(g => `
               <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--bg-panel-subtle); border-radius: var(--radius-md); border: 1px solid var(--border-subtle);">
                 <div>
@@ -2361,6 +2471,52 @@ function cancelCalibration() {
   playSound("click");
 }
 
+// HTML sanitization helper
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// Spoken text normalization and automatic punctuation formatting
+function formatSpokenText(raw) {
+  let text = (raw || "").trim();
+  if (!text) return "";
+
+  // Convert spoken punctuation words to actual symbols
+  text = text
+    .replace(/\bperiod\b/gi, ".")
+    .replace(/\bfull stop\b/gi, ".")
+    .replace(/\bcomma\b/gi, ",")
+    .replace(/\bquestion mark\b/gi, "?")
+    .replace(/\bexclamation mark\b/gi, "!")
+    .replace(/\bexclamation point\b/gi, "!")
+    .replace(/\bnew line\b/gi, "\n");
+
+  // Capitalize sentence beginnings
+  text = text.replace(/(^\w|[.!?]\s+\w)/g, c => c.toUpperCase());
+  return text;
+}
+
+// Update live transcription box with both committed and interim text
+function updateTranscriptionDisplay() {
+  const display = document.getElementById("transcription-display");
+  if (!display) return;
+  if (!state.transcriptionText && !state.interimTranscription) {
+    display.innerHTML = '<span style="color:var(--text-faint);">Your spoken words or typed message will appear here...</span>';
+  } else {
+    let html = escapeHtml(state.transcriptionText);
+    if (state.interimTranscription) {
+      html += (html ? ' ' : '') + `<span class="interim-speech-live">${escapeHtml(state.interimTranscription)}</span>`;
+    }
+    display.innerHTML = html;
+  }
+}
+
 // Speech Recognition & Virtual Keyboard
 let speechRecognition = null;
 
@@ -2385,33 +2541,79 @@ function toggleSpeechRecognition() {
     speechRecognition = new SpeechRec();
     speechRecognition.continuous = true;
     speechRecognition.interimResults = true;
+    speechRecognition.lang = navigator.language || "en-US";
+    speechRecognition.maxAlternatives = 3;
 
     speechRecognition.onresult = (e) => {
-      let finalTranscript = "";
+      let finalChunk = "";
+      let interimChunk = "";
+
       for (let i = e.resultIndex; i < e.results.length; ++i) {
-        if (e.results[i].isFinal) finalTranscript += e.results[i][0].transcript;
+        const res = e.results[i];
+        const transcript = res[0].transcript;
+        const confidence = res[0].confidence;
+
+        // Filter out low-confidence background acoustic noise
+        if (confidence !== undefined && confidence > 0 && confidence < 0.40) {
+          continue;
+        }
+
+        if (res.isFinal) {
+          finalChunk += transcript;
+        } else {
+          interimChunk += transcript;
+        }
       }
-      if (finalTranscript) {
-        state.transcriptionText += (state.transcriptionText ? " " : "") + finalTranscript;
-        const display = document.getElementById("transcription-display");
-        if (display) display.textContent = state.transcriptionText;
+
+      if (finalChunk) {
+        const formatted = formatSpokenText(finalChunk);
+        if (formatted) {
+          state.transcriptionText += (state.transcriptionText ? " " : "") + formatted;
+        }
+        state.interimTranscription = "";
+      } else {
+        state.interimTranscription = interimChunk;
+      }
+
+      updateTranscriptionDisplay();
+    };
+
+    // Auto-reconnect so pauses in speech do not silently terminate recognition
+    speechRecognition.onend = () => {
+      if (state.isListening) {
+        setTimeout(() => {
+          if (state.isListening && speechRecognition) {
+            try { speechRecognition.start(); } catch (err) {}
+          }
+        }, 150);
       }
     };
 
-    speechRecognition.onerror = () => {
-      state.isListening = false;
-      renderView();
+    speechRecognition.onerror = (e) => {
+      console.log("[Speech Recognition Error]", e.error);
+      if (e.error === "not-allowed") {
+        state.isListening = false;
+        showGestureToast("⚠️ Microphone access denied. Please allow microphone permissions.");
+        renderView();
+      }
+      // 'no-speech' is expected during quiet pauses; do not abort session
     };
   }
 
   if (!state.isListening) {
-    speechRecognition.start();
-    state.isListening = true;
-    playSound("success");
+    try {
+      speechRecognition.start();
+      state.isListening = true;
+      playSound("success");
+      showGestureToast("🎙️ Speech Recognition Active: Speak naturally");
+    } catch (e) {
+      state.isListening = true;
+    }
   } else {
-    speechRecognition.stop();
     state.isListening = false;
+    try { speechRecognition.stop(); } catch (e) {}
     playSound("click");
+    showGestureToast("Speech recognition paused.");
   }
   renderView();
 }

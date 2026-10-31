@@ -10,7 +10,7 @@ FACE_LOST_MS = 200
 FRAME_Q_MAX = 2
 Q_MIN = 0.50
 EMIT_FLOOR_FACTOR = 0.85  # Gesture emitted once score >= 0.85 * base threshold (G4)
-STILL_SPEED = 0.10        # Max pointer speed (screen-widths / s over last 200ms)
+STILL_SPEED = 0.18        # Max pointer speed (screen-widths / s over last 200ms)
 COOLDOWN_MS = 600
 UNDO_WINDOW_MS = 2000
 DWELL_STILL_RADIUS = 0.02 # Normalized screen units

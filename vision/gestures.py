@@ -52,11 +52,11 @@ class GestureDetector:
 
     # Activation thresholds for expressions
     THRESHOLDS = {
-        GestureEnum.MOUTH_OPEN.value: 0.40,
-        GestureEnum.BROW_RAISE.value: 0.40,
-        GestureEnum.SMILE.value: 0.42,
-        GestureEnum.WINK_LEFT.value: 0.45,
-        GestureEnum.WINK_RIGHT.value: 0.45,
+        GestureEnum.MOUTH_OPEN.value: 0.32,
+        GestureEnum.BROW_RAISE.value: 0.32,
+        GestureEnum.SMILE.value: 0.35,
+        GestureEnum.WINK_LEFT.value: 0.38,
+        GestureEnum.WINK_RIGHT.value: 0.38,
     }
 
     # Hysteresis release threshold

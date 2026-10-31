@@ -114,8 +114,8 @@ class PointerTracker:
     def __init__(
         self,
         profile: Optional[CalibrationProfile] = None,
-        min_cutoff: float = 1.2,
-        beta: float = 0.02,
+        min_cutoff: float = 1.0,
+        beta: float = 0.015,
     ) -> None:
         self.profile = profile or CalibrationProfile()
 
