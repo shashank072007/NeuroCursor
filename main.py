@@ -22,7 +22,8 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from backend.config import DEFAULT_HOST, DEFAULT_PORT, DEV_TOKEN
-from backend.app import create_app, SERVER_TOKEN
+import backend.app as backend_app
+from backend.app import create_app
 
 
 def run_tests():
@@ -59,8 +60,8 @@ def main():
     parser.add_argument("--camera-index", type=int, default=0, help="Camera device index (default 0)")
     parser.add_argument("--replay-file", default=None, help="Path to JSONL frames file for replay mode")
     parser.add_argument("--simulate", action="store_true", help="Simulate OS mouse actions without moving cursor")
-    parser.add_argument("--dev", action="store_true", default=True, help="Enable developer mode (fixed token)")
-    parser.add_argument("--no-dev", dest="dev", action="store_false", help="Disable developer mode")
+    parser.add_argument("--dev", action="store_true", default=False, help="Use the fixed development token (unsafe for hosted UI connections)")
+    parser.add_argument("--no-dev", dest="dev", action="store_false", help="Use a random local agent token (default)")
     parser.add_argument("--open-browser", action="store_true", help="Automatically open web frontend in browser")
     parser.add_argument("--test", action="store_true", help="Run integration tests and exit")
     parser.add_argument("--debug-vision", action="store_true", help="Launch OpenCV vision debug visualizer window")
@@ -85,7 +86,7 @@ def main():
     )
 
     url = f"http://{args.host}:{args.port}"
-    token = DEV_TOKEN if args.dev else SERVER_TOKEN
+    token = DEV_TOKEN if args.dev else backend_app.SERVER_TOKEN
 
     print(f"\n=======================================================")
     print(f"  🧠 NeuroCursor (FLUX) Integration Platform Online")

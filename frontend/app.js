@@ -4,6 +4,7 @@
 
 const state = {
   page: "dashboard",
+  startupModeChoiceActive: true,
   darkMode: false,
   headMouseEnabled: !["speech", "mouse"].includes(localStorage.getItem("neuro_control_mode") || "head"),
   controlMode: localStorage.getItem("neuro_control_mode") || "head",
@@ -188,6 +189,7 @@ let dwellSpent = false;
 let lastFrameTime = performance.now();
 let lastSyntheticClickAt = 0;
 const DWELL_RADIUS_THRESHOLD = 38;
+let startupModeGestureSpent = false;
 let lastGestureClickTime = 0;
 let lastEyebrowToggleTime = 0;
 let gestureToastTimer = null;
@@ -197,6 +199,10 @@ let voiceGlideAnimationId = null;
 let voiceActiveTimeout = null;
 let voiceRestartTimer = null;
 let voiceStartInFlight = false;
+let voiceRecognizerStarting = false;
+let voiceRetryCount = 0;
+let lastWakeActivationAt = 0;
+let voiceStartWatchdog = null;
 
 // Floating Gesture Notification Toast
 function showGestureToast(msg) {
@@ -213,6 +219,28 @@ function showGestureToast(msg) {
 // Master In-Browser Head Mouse Toggle
 async function toggleHeadMouseControl() {
   await setControlMode(state.headMouseEnabled ? "mouse" : "head");
+}
+
+async function chooseInitialCursorMode(mode) {
+  if (mode !== "head" && mode !== "speech") return;
+  const overlay = document.getElementById("mode-start-overlay");
+  if (overlay) overlay.classList.remove("active");
+  state.startupModeChoiceActive = false;
+  startupModeGestureSpent = false;
+  // Start from the user's click so the browser can prompt for microphone access.
+  const voiceSetup = startVoiceCommandListener();
+  await setControlMode(mode);
+  await voiceSetup;
+  if (!state.voiceError) {
+    showGestureToast(`${mode === "head" ? "Head" : "Voice"} Cursor selected. Say “Hey Cursor, switch to ${mode === "head" ? "voice" : "head"} cursor” to change modes.`);
+  }
+}
+
+async function switchCursorModeFromVoice(mode) {
+  if (mode !== "head" && mode !== "speech") return;
+  await setControlMode(mode);
+  if (mode === "head") deactivateVoiceCursorState();
+  showGestureToast(`${mode === "head" ? "Head" : "Voice"} Cursor mode selected`);
 }
 
 async function setControlMode(mode) {
@@ -232,7 +260,10 @@ async function setControlMode(mode) {
     if (text) text.textContent = mode === "hybrid" ? "Hybrid: ON" : "Head Mouse: ON";
     if (!backendConnected) await startCameraVision();
   } else {
-    if (cursor) cursor.classList.remove("active");
+    if (cursor) {
+      if (mode === "speech" && state.voiceCursorActive) cursor.classList.add("active", "voice-listening");
+      else cursor.classList.remove("active");
+    }
     if (btn) btn.classList.remove("active");
     if (text) text.textContent = mode === "speech" ? "Speech Cursor" : "Physical Mouse";
   }
@@ -274,15 +305,46 @@ function syncBackendControlMode() {
 // -------------------------------------------------------------
 // FLUX BACKEND INTEGRATION & SSE STREAM
 // -------------------------------------------------------------
-const BACKEND_URL = (window.location.protocol === "http:" || window.location.protocol === "https:")
-  ? window.location.origin
-  : "http://127.0.0.1:5000";
-const FLUX_TOKEN = "dev-token";
+let BACKEND_URL = sessionStorage.getItem("neuro_backend_url") || "http://127.0.0.1:5000";
+let FLUX_TOKEN = sessionStorage.getItem("neuro_backend_token") || "";
+let localRuntimeConfigLoaded = false;
+let localRuntimeConfigPromise = null;
 let backendSSE = null;
 let backendConnected = false;
+let backendInitializationPromise = null;
+
+async function loadLocalRuntimeConfig() {
+  if (localRuntimeConfigLoaded) return;
+  if (localRuntimeConfigPromise) return localRuntimeConfigPromise;
+  localRuntimeConfigPromise = (async () => {
+    const localHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+    if (localHost) {
+      try {
+        const response = await fetch(`${window.location.origin}/runtime-config`, { cache: "no-store" });
+        if (response.ok) {
+          const config = await response.json();
+          BACKEND_URL = config.backend_url || window.location.origin;
+          FLUX_TOKEN = config.token || FLUX_TOKEN;
+        }
+      } catch (error) {
+        console.warn("[NeuroCursor] Could not load local agent configuration:", error);
+      }
+    }
+    localRuntimeConfigLoaded = true;
+  })();
+  return localRuntimeConfigPromise;
+}
 
 function initBackendConnection() {
-  try {
+  if (backendInitializationPromise) return backendInitializationPromise;
+  backendInitializationPromise = (async () => {
+    await loadLocalRuntimeConfig();
+    if (!FLUX_TOKEN) {
+      updateAgentConnectionUI(false);
+      if (!["localhost", "127.0.0.1"].includes(window.location.hostname)) openAgentConnectionDialog();
+      return;
+    }
+    if (backendSSE) backendSSE.close();
     const streamUrl = `${BACKEND_URL}/stream?token=${FLUX_TOKEN}`;
     backendSSE = new EventSource(streamUrl);
 
@@ -294,7 +356,9 @@ function initBackendConnection() {
       syncWebcamVideoStreams();
       const statusText = document.getElementById("system-status-text");
       if (statusText) statusText.textContent = "Vision: Connected to Python";
+      updateAgentConnectionUI(true);
       callBackend("/vision/sensitivity", { value: state.sensitivity });
+      callBackend("/control-mode", { mode: state.startupModeChoiceActive ? "speech" : state.controlMode });
     };
 
     backendSSE.onmessage = (event) => {
@@ -313,10 +377,81 @@ function initBackendConnection() {
         state.cameraActive = false;
         state.trackingDetected = false;
         syncWebcamVideoStreams();
+        updateAgentConnectionUI(false);
       }
     };
-  } catch (e) {
-    console.warn("[NeuroCursor] Python backend unavailable; integrated tracking is disabled:", e);
+  })().finally(() => { backendInitializationPromise = null; });
+  return backendInitializationPromise;
+}
+
+function updateAgentConnectionUI(connected) {
+  const button = document.getElementById("agent-connect-button");
+  if (button) button.textContent = connected ? "Python Connected" : "Connect Python";
+  const error = document.getElementById("agent-connect-error");
+  if (connected && error) error.textContent = "Connected. Your camera and cursor stay on this laptop.";
+}
+
+function openAgentConnectionDialog() {
+  const overlay = document.getElementById("agent-connect-overlay");
+  if (!overlay) return;
+  const urlInput = document.getElementById("agent-url-input");
+  if (urlInput && !urlInput.value) urlInput.value = BACKEND_URL;
+  overlay.classList.add("active");
+}
+
+async function connectLocalAgent() {
+  const urlInput = document.getElementById("agent-url-input");
+  const tokenInput = document.getElementById("agent-token-input");
+  const errorEl = document.getElementById("agent-connect-error");
+  const button = document.querySelector("#agent-connect-overlay .primary-btn");
+  const url = (urlInput?.value || "").trim().replace(/\/$/, "");
+  const token = (tokenInput?.value || "").trim();
+  if (!/^https?:\/\//i.test(url) || !token) {
+    if (errorEl) errorEl.textContent = "Enter the local agent address and the token printed by Python.";
+    return;
+  }
+  let parsedAgentUrl;
+  try { parsedAgentUrl = new URL(url); } catch (error) { parsedAgentUrl = null; }
+  const loopbackHost = parsedAgentUrl && ["127.0.0.1", "localhost", "[::1]"].includes(parsedAgentUrl.hostname);
+  if (!parsedAgentUrl || parsedAgentUrl.protocol !== "http:" || !loopbackHost || parsedAgentUrl.pathname !== "/") {
+    if (errorEl) errorEl.textContent = "For privacy, NeuroCursor connects only to the local Python app at http://127.0.0.1:5000.";
+    return;
+  }
+  if (button) { button.disabled = true; button.textContent = "Connecting…"; }
+  if (errorEl) errorEl.textContent = "";
+  try {
+    const response = await fetch(`${url}/health`, {
+      cache: "no-store",
+      mode: "cors",
+      targetAddressSpace: "loopback"
+    });
+    if (!response.ok) throw new Error(`Local agent replied with HTTP ${response.status}.`);
+    await response.json();
+    const authResponse = await fetch(`${url}/local/session`, {
+      headers: { "X-Flux-Token": token },
+      cache: "no-store",
+      mode: "cors",
+      targetAddressSpace: "loopback"
+    });
+    if (!authResponse.ok) {
+      if (authResponse.status === 401) throw new Error("That token was not accepted. Copy the newest token from the Python window.");
+      throw new Error(`The local agent rejected the connection (HTTP ${authResponse.status}).`);
+    }
+    BACKEND_URL = url;
+    FLUX_TOKEN = token;
+    sessionStorage.setItem("neuro_backend_url", url);
+    sessionStorage.setItem("neuro_backend_token", token);
+    localRuntimeConfigLoaded = true;
+    backendInitializationPromise = null;
+    document.getElementById("agent-connect-overlay")?.classList.remove("active");
+    await initBackendConnection();
+    startCameraVision();
+    syncWebcamVideoStreams();
+    if (tokenInput) tokenInput.value = "";
+  } catch (error) {
+    if (errorEl) errorEl.textContent = `Could not reach the local Python app. Check it is running, then allow local network access. ${error.message || ""}`;
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "Connect to this laptop"; }
   }
 }
 
@@ -341,12 +476,14 @@ function handleBackendMessage(msg) {
       const ny = head.ny !== undefined ? head.ny : 0.5;
       const gest = msg.gesture ? msg.gesture.name : "none";
       const score = msg.gesture ? msg.gesture.score : 0.0;
-      updateTrackingKinematics(nx, ny, gest, score);
+      const heldMs = msg.gesture ? Number(msg.gesture.held_ms || 0) : 0;
+      updateTrackingKinematics(nx, ny, gest, score, heldMs);
       state.trackingDetected = true;
     } else {
       state.trackingDetected = false;
       state.gestureName = "none";
       state.gestureScore = 0;
+      startupModeGestureSpent = false;
       const gestureLabel = document.getElementById("active-gesture-display");
       if (gestureLabel) gestureLabel.textContent = "None (Neutral)";
       resetDwellSelection();
@@ -393,6 +530,8 @@ function handleBackendMessage(msg) {
 
 async function callBackend(endpoint, body = {}) {
   try {
+    await loadLocalRuntimeConfig();
+    if (!FLUX_TOKEN) return { ok: false, error: "Connect to the local Python app first." };
     const res = await fetch(`${BACKEND_URL}${endpoint}`, {
       method: "POST",
       headers: {
@@ -488,7 +627,7 @@ function stopCameraVision() {
 // Coordinates arrive normalized and already calibrated/filtered by Python.
 let lastObservedGesture = "none";
 let calibrationPreviousPause = false;
-function updateTrackingKinematics(targetNx, targetNy, gesture = "none", score = 0) {
+function updateTrackingKinematics(targetNx, targetNy, gesture = "none", score = 0, heldMs = 0) {
   state.rawNx = Number(targetNx);
   state.rawNy = Number(targetNy);
   state.gestureName = gesture || "none";
@@ -498,6 +637,18 @@ function updateTrackingKinematics(targetNx, targetNy, gesture = "none", score = 
     gestureLabel.textContent = state.gestureName === "none"
       ? "None (Neutral)"
       : `${state.gestureName.toUpperCase()} · ${Math.round(state.gestureScore * 100)}%`;
+  }
+
+  // During onboarding, let the user aim with their head and confirm the
+  // selected mode using the same safe smile/left-wink left-click gestures.
+  if (state.startupModeChoiceActive) {
+    const selectionGesture = ["smile", "wink_left"].includes(state.gestureName);
+    if (!selectionGesture) startupModeGestureSpent = false;
+    else if (!startupModeGestureSpent && state.gestureScore >= 0.55 &&
+             Number(state.faceQuality || 0) >= 0.50 && heldMs >= Math.max(300, Number(state.gestureHoldMs) || 180)) {
+      startupModeGestureSpent = true;
+      executeClickAt(Number(targetNx) * window.innerWidth, Number(targetNy) * window.innerHeight, "left", "Startup Gesture");
+    }
   }
 
   // Toggle on an activation edge, never repeatedly while the expression is held.
@@ -539,7 +690,7 @@ function updateTrackingKinematics(targetNx, targetNy, gesture = "none", score = 
   const now = performance.now();
   const dt = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000));
   lastFrameTime = now;
-  const dwellEnabled = ["head", "hybrid"].includes(state.controlMode) &&
+  const dwellEnabled = (state.startupModeChoiceActive || ["head", "hybrid"].includes(state.controlMode)) &&
     state.headMouseEnabled && !state.cursorPaused && !state.calibrating && !speechOwnsCursor;
   const ring = document.getElementById("dwell-progress-bar");
   if (!dwellEnabled) {
@@ -629,15 +780,44 @@ function getSpeechRecognitionCtor() {
 
 function restartVoiceRecognizerSoon(delayMs = 220) {
   if (voiceRestartTimer) clearTimeout(voiceRestartTimer);
+  const retryDelay = delayMs == null
+    ? Math.min(2400, 250 * (2 ** Math.min(voiceRetryCount, 3))) + Math.random() * 120
+    : delayMs;
   voiceRestartTimer = setTimeout(() => {
+    voiceRestartTimer = null;
     if (!voiceEngineArmed || state.isListening) return;
-    try {
-      if (voiceCommandRecognizer) voiceCommandRecognizer.start();
-      else attachVoiceRecognizer();
-    } catch (e) {
+    if (voiceRecognizerStarting) return;
+    if (!voiceCommandRecognizer) {
       attachVoiceRecognizer();
+      return;
     }
-  }, delayMs);
+    try {
+      voiceRecognizerStarting = true;
+      voiceCommandRecognizer.start();
+      watchVoiceRecognizerStart();
+    } catch (err) {
+      voiceRecognizerStarting = false;
+      if (err && err.name === "NotSupportedError") {
+        voiceEngineArmed = false;
+        state.voiceError = "unsupported";
+        updateVoicePillUI();
+        return;
+      }
+      voiceRetryCount = Math.min(voiceRetryCount + 1, 4);
+      restartVoiceRecognizerSoon(null);
+    }
+  }, retryDelay);
+}
+
+function watchVoiceRecognizerStart() {
+  if (voiceStartWatchdog) clearTimeout(voiceStartWatchdog);
+  voiceStartWatchdog = setTimeout(() => {
+    voiceStartWatchdog = null;
+    if (!voiceEngineArmed || !voiceRecognizerStarting || state.voiceListening) return;
+    voiceRecognizerStarting = false;
+    voiceRetryCount = Math.min(voiceRetryCount + 1, 4);
+    restartVoiceRecognizerSoon(null);
+  }, 7000);
 }
 
 function destroyVoiceRecognizer() {
@@ -645,6 +825,11 @@ function destroyVoiceRecognizer() {
     clearTimeout(voiceRestartTimer);
     voiceRestartTimer = null;
   }
+  if (voiceStartWatchdog) {
+    clearTimeout(voiceStartWatchdog);
+    voiceStartWatchdog = null;
+  }
+  voiceRecognizerStarting = false;
   if (!voiceCommandRecognizer) return;
   voiceCommandRecognizer.onstart = null;
   voiceCommandRecognizer.onend = null;
@@ -669,7 +854,7 @@ function attachVoiceRecognizer() {
   const SpeechRec = getSpeechRecognitionCtor();
   if (!SpeechRec) return;
 
-  destroyVoiceRecognizer();
+  if (voiceCommandRecognizer) destroyVoiceRecognizer();
   const rec = new SpeechRec();
   rec.continuous = true;
   rec.interimResults = true;
@@ -677,26 +862,30 @@ function attachVoiceRecognizer() {
   rec.maxAlternatives = 3;
 
   rec.onstart = () => {
+    if (voiceStartWatchdog) clearTimeout(voiceStartWatchdog);
+    voiceStartWatchdog = null;
+    voiceRecognizerStarting = false;
+    voiceRetryCount = 0;
     state.voiceListening = true;
     state.voiceError = "";
     updateVoicePillUI();
   };
 
   rec.onresult = (event) => {
-    let transcript = "";
-    let isFinal = false;
     for (let i = event.resultIndex; i < event.results.length; ++i) {
-      transcript += event.results[i][0].transcript;
-      if (event.results[i].isFinal) isFinal = true;
+      const result = event.results[i];
+      const transcript = selectVoiceHypothesis(result);
+      if (transcript) handleVoiceCommandPhrase(transcript, !!result.isFinal);
     }
-    transcript = normalizeVoiceTranscript(transcript);
-    if (transcript) handleVoiceCommandPhrase(transcript, isFinal);
   };
 
   rec.onerror = (e) => {
+    if (voiceStartWatchdog) clearTimeout(voiceStartWatchdog);
+    voiceStartWatchdog = null;
     const err = e && e.error ? e.error : "unknown";
     if (err === "not-allowed" || err === "service-not-allowed") {
       voiceEngineArmed = false;
+      voiceRecognizerStarting = false;
       state.voiceListening = false;
       state.voiceError = "mic-blocked";
       showGestureToast("Microphone blocked. Allow mic in the browser address bar.");
@@ -704,25 +893,46 @@ function attachVoiceRecognizer() {
       return;
     }
     if (err === "audio-capture") {
+      voiceEngineArmed = false;
+      voiceRecognizerStarting = false;
+      state.voiceListening = false;
       state.voiceError = "no-mic";
       showGestureToast("No microphone was found.");
+      updateVoicePillUI();
+    } else if (err === "network") {
+      state.voiceError = "network";
+      updateVoicePillUI();
     }
     // aborted / no-speech / network: onend will reconnect
   };
 
   rec.onend = () => {
+    if (voiceStartWatchdog) clearTimeout(voiceStartWatchdog);
+    voiceStartWatchdog = null;
+    voiceRecognizerStarting = false;
     state.voiceListening = false;
     updateVoicePillUI();
     if (voiceEngineArmed && !state.isListening) {
-      restartVoiceRecognizerSoon(240);
+      voiceRetryCount = Math.min(voiceRetryCount + 1, 4);
+      restartVoiceRecognizerSoon(null);
     }
   };
 
   voiceCommandRecognizer = rec;
   try {
+    voiceRecognizerStarting = true;
     rec.start();
+    watchVoiceRecognizerStart();
   } catch (e) {
-    restartVoiceRecognizerSoon(320);
+    voiceRecognizerStarting = false;
+    if (e && e.name === "NotSupportedError") {
+      voiceEngineArmed = false;
+      state.voiceError = "unsupported";
+      updateVoicePillUI();
+      return;
+    }
+    voiceRetryCount = Math.min(voiceRetryCount + 1, 4);
+    restartVoiceRecognizerSoon(null);
   }
 }
 
@@ -742,19 +952,25 @@ async function startVoiceCommandListener() {
 
   voiceStartInFlight = true;
   voiceEngineArmed = true;
+  voiceRetryCount = 0;
+  lastWakeActivationAt = 0;
+  lastVoiceCommandTime = 0;
+  lastProcessedCommand = "";
   state.voiceError = "";
   updateVoicePillUI();
 
   try {
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
     await ensureMicrophonePermission();
     attachVoiceRecognizer();
     showGestureToast("Voice on. Say Hey Cursor, then a command.");
     playSound("success");
   } catch (err) {
     voiceEngineArmed = false;
+    voiceRecognizerStarting = false;
     state.voiceListening = false;
-    state.voiceError = "mic-blocked";
-    showGestureToast("Allow microphone access to turn on voice control.");
+    state.voiceError = err && err.name === "NotFoundError" ? "no-mic" : err && err.name === "NotAllowedError" ? "mic-blocked" : "unsupported";
+    showGestureToast(state.voiceError === "no-mic" ? "No microphone was found." : state.voiceError === "mic-blocked" ? "Allow microphone access to turn on voice control." : "Voice recognition could not start in this browser.");
     updateVoicePillUI();
   } finally {
     voiceStartInFlight = false;
@@ -763,6 +979,8 @@ async function startVoiceCommandListener() {
 
 function stopVoiceCommandListener() {
   voiceEngineArmed = false;
+  voiceRecognizerStarting = false;
+  voiceRetryCount = 0;
   state.voiceListening = false;
   destroyVoiceRecognizer();
   deactivateVoiceCursorState();
@@ -790,9 +1008,15 @@ function updateVoicePillUI() {
 
   pill.classList.remove("listening", "awake", "error");
 
+  if (state.voiceError === "network" && voiceEngineArmed) {
+    pill.classList.add("listening");
+    status.textContent = "Reconnecting voice…";
+    return;
+  }
+
   if (state.voiceError === "unsupported" || state.voiceError === "mic-blocked" || state.voiceError === "no-mic") {
     pill.classList.add("error");
-    status.textContent = state.voiceError === "unsupported" ? "Voice unsupported" : "Mic blocked";
+    status.textContent = state.voiceError === "unsupported" ? "Voice unsupported" : state.voiceError === "no-mic" ? "No microphone" : "Mic blocked";
     return;
   }
   if (state.voiceCursorActive) {
@@ -809,10 +1033,32 @@ function updateVoicePillUI() {
 function normalizeVoiceTranscript(raw) {
   let t = (raw || "").trim().toLowerCase();
   t = t.replace(/[.,!?]+/g, " ");
-  t = t.replace(/\b(hey|hi|hello|hay|he)\s+(curser|courser|kursor|cursa|kerser|cursor|curse her|cur sure|ker sure|computer)\b/g, "hey cursor");
+  t = t.replace(/\b(hey|hi|hello|hay|he|ok|okay)\s+(curser|courser|kursor|cursa|kerser|cursors|cursor|cursed|curse her|cur sure|ker sure|computer)\b/g, "hey cursor");
   t = t.replace(/\bokay cursor\b/g, "hey cursor");
   t = t.replace(/\s+/g, " ").trim();
   return t;
+}
+
+function selectVoiceHypothesis(result) {
+  if (!result || !result.length) return "";
+  let chosen = "";
+  let chosenScore = -Infinity;
+  for (let i = 0; i < result.length; i++) {
+    const alternative = result[i];
+    const transcript = normalizeVoiceTranscript(alternative && alternative.transcript);
+    if (!transcript) continue;
+    let intentScore = 0;
+    if (/\b(?:hey|hi|hello|okay|ok|activate|wake up)\s+cursor\b/.test(transcript)) intentScore += 6;
+    if (/\b(?:switch|change|use|activate).*(?:head|voice) cursor\b/.test(transcript)) intentScore += 8;
+    else if (/\b(?:point|move|navigate|look at|aim at|click|select|choose|pause|resume)\b/.test(transcript)) intentScore += 3;
+    const confidence = Number(alternative && alternative.confidence) || 0;
+    const score = intentScore * 2 + confidence;
+    if (score > chosenScore) {
+      chosen = transcript;
+      chosenScore = score;
+    }
+  }
+  return chosen;
 }
 
 let lastVoiceCommandTime = 0;
@@ -820,9 +1066,6 @@ let lastProcessedCommand = "";
 
 function handleVoiceCommandPhrase(phrase, isFinal = false) {
   const now = performance.now();
-  if (now - lastVoiceCommandTime < 700 && phrase === lastProcessedCommand) {
-    return;
-  }
 
   // 1. Wake word detection: "Hey Cursor" / "Activate Cursor" / "Wake Up Cursor"
   const wakeWords = [
@@ -844,9 +1087,10 @@ function handleVoiceCommandPhrase(phrase, isFinal = false) {
   }
 
   if (wakeMatched) {
-    lastVoiceCommandTime = now;
-    lastProcessedCommand = phrase;
-    activateVoiceCursor();
+    if (now - lastWakeActivationAt > 1200) {
+      lastWakeActivationAt = now;
+      activateVoiceCursor();
+    }
 
     if (!remainingPhrase || remainingPhrase.length < 3) {
       return;
@@ -856,8 +1100,9 @@ function handleVoiceCommandPhrase(phrase, isFinal = false) {
 
   // Commands wait for a final transcript so partial words do not fire
   if (!isFinal) return;
+  if (now - lastVoiceCommandTime < 700 && phrase === lastProcessedCommand) return;
 
-  const isDirectCommand = /(?:point|go to|move|navigate|look at|aim at|target|click|select|pause|sleep|resume|speak|speech|transcribe|water|food|canvas|camera|sos|emergency|center|left|right|up|down|priority|hybrid mode|mouse mode)/i.test(phrase);
+  const isDirectCommand = /(?:point|go to|move|navigate|look at|aim at|target|click|select|pause|sleep|resume|speak|speech|transcribe|water|food|canvas|camera|sos|emergency|center|left|right|up|down|priority|hybrid mode|mouse mode|switch|voice cursor|head cursor)/i.test(phrase);
 
   if (state.voiceCursorActive || isDirectCommand) {
     processVoiceInstruction(phrase);
@@ -1258,6 +1503,17 @@ function matchFeatureIntent(cleanQuery) {
 function processVoiceInstruction(phrase) {
   console.log("[Process Voice Instruction]:", phrase);
 
+  if (/\b(?:switch|change|use|activate)\s+(?:to\s+)?(?:the\s+)?voice cursor(?: mode)?\b/i.test(phrase) ||
+      /\bswitch\s+cursor\s+to\s+voice(?: mode)?\b/i.test(phrase)) {
+    switchCursorModeFromVoice("speech");
+    return;
+  }
+  if (/\b(?:switch|change|use|activate)\s+(?:to\s+)?(?:the\s+)?head cursor(?: mode)?\b/i.test(phrase) ||
+      /\bswitch\s+cursor\s+to\s+head(?: mode)?\b/i.test(phrase)) {
+    switchCursorModeFromVoice("head");
+    return;
+  }
+
   if (/\b(?:head|head movement) mode\b/.test(phrase)) { setControlMode("head"); return; }
   if (/\b(?:speech|voice) mode\b/.test(phrase)) { setControlMode("speech"); return; }
   if (/\b(?:physical|regular) mouse mode\b/.test(phrase)) { setControlMode("mouse"); return; }
@@ -1278,7 +1534,7 @@ function processVoiceInstruction(phrase) {
 
   // Directional speech navigation. Each command moves a predictable fraction
   // of the viewport and can be repeated for finer or faster travel.
-  const moveMatch = phrase.match(/\b(?:move|go|nudge|cursor)\s+(?:the\s+)?cursor\s+(?:to\s+)?(left|right|up|down)\b|\b(?:move|go|nudge)\s+(left|right|up|down)\b/i);
+  const moveMatch = phrase.match(/\b(?:move|go|nudge|cursor)\s+(?:the\s+)?cursor\s+(?:to\s+)?(?:the\s+)?(left|right|up|down)\b|\b(?:move|go|nudge)\s+(?:the\s+)?(left|right|up|down)\b/i);
   if (moveMatch) {
     const direction = (moveMatch[1] || moveMatch[2]).toLowerCase();
     const amount = phrase.includes("far") || phrase.includes("large") ? 0.22 : 0.08;
@@ -2831,8 +3087,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Activate Head-Controlled Cursor by default
+  state.startupModeChoiceActive = true;
+  state.headMouseEnabled = true;
   const globalCursor = document.getElementById("global-head-cursor");
-  if (globalCursor) globalCursor.classList.add("active");
+  if (globalCursor) globalCursor.classList.toggle("active", state.headMouseEnabled);
   const headMouseBtn = document.getElementById("head-mouse-toggle-btn");
   if (headMouseBtn) headMouseBtn.classList.toggle("active", state.headMouseEnabled);
   const headMouseTxt = document.getElementById("head-mouse-status-text");
@@ -2851,13 +3109,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Auto-start camera feed & synchronise streams
   startCameraVision();
-  syncBackendControlMode();
+  // Keep Python desktop control idle until the startup mode choice is made.
+  callBackend("/control-mode", { mode: "speech" });
   syncWebcamVideoStreams();
   updateVoicePillUI();
-  setTimeout(() => {
-    if (!voiceEngineArmed) {
-      showGestureToast("Click Voice: Off in the top bar, allow the microphone, then say Hey Cursor");
-    }
-  }, 1400);
 });
 

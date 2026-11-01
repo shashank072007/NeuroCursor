@@ -109,9 +109,31 @@ The steps below use the GitHub `test1` branch, which contains the integrated Pyt
    python main.py --source live --camera-index 0 --open-browser
    ```
 
-8. To use speech, click **Voice: Off**, allow microphone access for `127.0.0.1`, then say **“Hey Cursor”** followed by a command. In **Head + speech** mode, choose which input has priority.
+8. Choose a mode in the startup dialog and allow microphone access when the browser asks. Say **“Hey Cursor”** followed by a command. If microphone access was denied, use the top-bar Voice button to retry. In **Head + speech** mode, choose which input has priority.
+
+At app startup, a mode chooser asks whether to use **Head Cursor** or **Voice Cursor**. The microphone listener is armed after choosing so you can switch later by saying **“Hey Cursor, switch to voice cursor now”** or **“Hey Cursor, switch to head cursor mode.”** You can also change the mode with the top-bar selector.
 
 **Platform notes:** Windows 10/11 is the primary desktop-control target. On macOS, grant camera and Accessibility permissions to the terminal/Python. On Linux, the camera may require access to `/dev/video0`, and native mouse control can depend on the desktop session (X11/Wayland). The in-browser controls can be used with a supported browser even when native desktop permissions are unavailable.
+
+### Hosted web interface with local Python companion
+
+The web interface is published at **https://shashank072007.github.io/NeuroCursor/**. Each user still runs the Python companion on their own laptop; it is the only process that opens the webcam and it performs native cursor actions locally. Camera frames are streamed from that laptop to the browser and are not sent to GitHub Pages.
+
+1. Start the companion from the project folder with Python and the requirements installed:
+
+   ```bash
+   python main.py --source live --camera-index 0 --simulate
+   ```
+
+   Keep this terminal open. It prints a random local connection token for this run. `--simulate` keeps native OS cursor movement and clicks disabled for a safe first connection. Remove `--simulate` only after verifying the tracking and calibration.
+
+2. Open **https://shashank072007.github.io/NeuroCursor/** in Chrome or Edge. Paste the token printed by Python into **Connect Python**. The browser may ask to allow the website to contact the local device; allow it for NeuroCursor. The connection uses `127.0.0.1:5000`, which is available only on that same laptop.
+
+3. After the Python status shows connected, choose Head Cursor or Voice Cursor. Calibrate each laptop separately; profiles and calibration remain local.
+
+The companion binds to `127.0.0.1` and uses a fresh token at each launch. The token is held in the browser tab session and should not be shared. To use a fork or another hosted domain, add that site's origin (scheme and host only) to the `FLUX_ALLOWED_ORIGINS` environment variable before launching Python, separated by commas if needed.
+
+GitHub Pages deploys the `frontend/` directory from the `test1` branch using `.github/workflows/pages.yml`. In repository **Settings → Pages**, set the source to **GitHub Actions** once; pushes that change the frontend then publish automatically.
 
 ### Running the Application
 
@@ -159,6 +181,8 @@ The static UI can be served independently for visual review, but head tracking, 
 | **"Hey Cursor"** | Frontend Voice | Activates voice-directed smooth navigation |
 | **"Click [Option]"**| Frontend Voice | Directly targets and activates interactive UI controls |
 | **"Move cursor left/right/up/down"** | Frontend Voice | Moves the browser cursor in small steps; repeat or say “move cursor far left” for a larger step |
+| **"Hey Cursor, switch to voice cursor now"** | Frontend Voice | Switches from head tracking to voice cursor control |
+| **"Hey Cursor, switch to head cursor mode"** | Frontend Voice | Returns to head tracking |
 | **Control mode selector** | Frontend / Backend | Choose Head + gestures, Speech cursor, Physical mouse, or Head + speech |
 | **Priority selector** | Frontend / Backend | In Hybrid mode, choose Head or Speech priority; speech priority temporarily suspends head actions while the voice cursor is awake |
 | **Flip / Mirror** | Frontend Vision | Quick toggle between standard (non-inverted) & mirrored webcam feed |

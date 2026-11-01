@@ -55,7 +55,24 @@ pipeline: ProcessorPipeline = None
 @app.after_request
 def add_cors_headers(response):
     """Enable Cross-Origin Resource Sharing for frontend compatibility."""
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    origin = request.headers.get("Origin")
+    allowed_origins = {
+        "http://127.0.0.1:5000",
+        "http://localhost:5000",
+        "https://shashank072007.github.io",
+    }
+    allowed_origins.update(
+        item.strip().rstrip("/")
+        for item in os.environ.get("FLUX_ALLOWED_ORIGINS", "").split(",")
+        if item.strip()
+    )
+    # Keep non-browser/API clients and the existing contract tests compatible,
+    # while allowing browser access only from the local app or hosted UI.
+    if not origin:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    elif origin.rstrip("/") in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Flux-Token"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     return response
@@ -88,6 +105,31 @@ def require_token(f):
 def serve_index():
     """Serves NeuroCursor frontend web interface."""
     return send_from_directory(FRONTEND_DIR, "index.html")
+
+
+@app.route("/runtime-config", methods=["GET"])
+def runtime_config():
+    """Expose the local agent's connection details to its same-origin UI only."""
+    origin = request.headers.get("Origin")
+    if origin and origin.rstrip("/") != request.host_url.rstrip("/"):
+        return jsonify({"ok": False, "error": "Runtime configuration is local-only."}), 403
+    response = jsonify({"backend_url": request.host_url.rstrip("/"), "token": SERVER_TOKEN})
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Small unauthenticated probe used when pairing the hosted UI to a local agent."""
+    return jsonify({"ok": True, "service": "NeuroCursor local vision agent"})
+
+
+@app.route("/local/session", methods=["GET"])
+@require_token
+def local_session():
+    """Validate a hosted UI's one-time connection token before enabling controls."""
+    return jsonify({"ok": True, "camera_owner": "local-python"})
 
 
 @app.route("/<path:path>", methods=["GET"])
@@ -481,8 +523,10 @@ def pointer_snap():
 # -------------------------------------------------------------
 def create_app(source_type: str = "mock", replay_file: str = None, simulate_os: bool = False, camera_index: int = 0, dev_mode: bool = None):
     global pipeline, SERVER_TOKEN
-    if dev_mode is True or os.environ.get("FLUX_DEV") == "1" or FLUX_DEV:
+    if dev_mode is True or (dev_mode is None and (os.environ.get("FLUX_DEV") == "1" or FLUX_DEV)):
         SERVER_TOKEN = DEV_TOKEN
+    elif dev_mode is False:
+        SERVER_TOKEN = os.environ.get("FLUX_TOKEN") or secrets.token_urlsafe(32)
     if source_type == "mock":
         frame_source = MockFrameSource()
     elif source_type == "replay":
@@ -509,20 +553,17 @@ def main():
     parser.add_argument("--camera-index", type=int, default=0, help="Webcam device index for live mode (default 0)")
     parser.add_argument("--replay-file", default=None, help="Path to JSONL file for replay source")
     parser.add_argument("--simulate", action="store_true", help="Run OS mouse control in simulation mode")
-    parser.add_argument("--dev", action="store_true", default=True, help="Enable FLUX_DEV mode with fixed token (default True)")
-    parser.add_argument("--no-dev", dest="dev", action="store_false", help="Disable FLUX_DEV mode")
+    parser.add_argument("--dev", action="store_true", default=False, help="Use the fixed development token (unsafe for hosted UI connections)")
+    parser.add_argument("--no-dev", dest="dev", action="store_false", help="Use a random local agent token (default)")
     parser.add_argument("--open-browser", action="store_true", help="Automatically launch frontend in default browser")
     args = parser.parse_args()
-
-    if args.dev:
-        global SERVER_TOKEN
-        SERVER_TOKEN = DEV_TOKEN
 
     app_instance = create_app(
         source_type=args.source,
         replay_file=args.replay_file,
         simulate_os=args.simulate,
-        camera_index=args.camera_index
+        camera_index=args.camera_index,
+        dev_mode=args.dev
     )
 
     url = f"http://{args.host}:{args.port}"

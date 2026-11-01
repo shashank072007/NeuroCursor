@@ -11,6 +11,40 @@
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
+  <div class="mode-start-overlay active" id="mode-start-overlay" role="dialog" aria-modal="true" aria-labelledby="mode-start-title">
+    <section class="mode-start-card">
+      <p class="mode-start-eyebrow">NEUROCURSOR SETUP</p>
+      <h1 id="mode-start-title">Which cursor feels more comfortable?</h1>
+      <p>Choose how you want to control NeuroCursor. You can switch modes later by voice or from the mode selector.</p>
+      <div class="mode-start-options">
+        <button type="button" class="primary-btn" onclick="chooseInitialCursorMode('head')">
+          <i data-lucide="scan-face"></i> Head Cursor
+          <small>Move your head; use facial gestures to click.</small>
+        </button>
+        <button type="button" class="secondary-btn" onclick="chooseInitialCursorMode('speech')">
+          <i data-lucide="mic"></i> Voice Cursor
+          <small>Say “Hey Cursor” and give a spoken cursor command.</small>
+        </button>
+      </div>
+      <p class="mode-start-note">Hands-free choice: move the visible head cursor onto Head Cursor or Voice Cursor, then hold a smile or left wink for about half a second, or wait for the green dwell circle to complete. Voice listening stays available for later mode switches; allow microphone access when asked.</p>
+    </section>
+  </div>
+
+  <div class="agent-connect-overlay" id="agent-connect-overlay" role="dialog" aria-modal="true" aria-labelledby="agent-connect-title">
+    <section class="agent-connect-card">
+      <p class="mode-start-eyebrow">LOCAL PYTHON COMPANION</p>
+      <h1 id="agent-connect-title">Connect this laptop</h1>
+      <p>Start NeuroCursor on this laptop first. Python keeps webcam processing and cursor control on your device.</p>
+      <label for="agent-url-input">Local agent address</label>
+      <input id="agent-url-input" type="url" value="http://127.0.0.1:5000" autocomplete="url" spellcheck="false">
+      <label for="agent-token-input">Local agent token (shown in the Python terminal)</label>
+      <input id="agent-token-input" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the local token">
+      <p class="agent-connect-error" id="agent-connect-error" role="status"></p>
+      <button type="button" class="primary-btn" onclick="connectLocalAgent()">Connect to this laptop</button>
+      <small>Allow this page to contact your local device if your browser asks. Camera frames stay on your laptop.</small>
+    </section>
+  </div>
+
   <!-- Global Head-Controlled Cursor Pointer with Dwell Ring & Voice Halo -->
   <div id="global-head-cursor" class="global-head-cursor">
     <div class="cursor-voice-halo" id="cursor-voice-halo"></div>
@@ -128,6 +162,7 @@
           <strong id="topbar-current-page">Dashboard</strong>
         </div>
         <div class="top-actions">
+          <button type="button" class="topbar-control-select" id="agent-connect-button" onclick="openAgentConnectionDialog()" title="Connect or reconnect the local Python companion">Connect Python</button>
           <!-- Voice Interactive Cursor Command Pill -->
           <button type="button" class="voice-command-pill" id="voice-command-pill" onclick="toggleVoiceCommandListener()" title="Turn on voice control, then say Hey Cursor">
             <span class="voice-mic-wave"></span>
