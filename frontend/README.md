@@ -17,7 +17,7 @@
 - **Selectable Cursor Modes**: Head + gestures, Speech cursor, Physical mouse, or Hybrid. Hybrid mode lets the user choose whether head or speech input owns browser cursor navigation.
 - **Startup Mode Choice**: On launch, choose Head Cursor or Voice Cursor. The voice listener remains available for spoken mode switching: `"Hey Cursor, switch to voice cursor now"` and `"Hey Cursor, switch to head cursor mode"`.
 - **Directional Speech Navigation**: With voice enabled, say `"Hey Cursor, move cursor left"`, `"move cursor up"`, or `"point to center"`; say `"click [option]"` to select a named UI control.
-- **Speech-to-Text & Transcriber**: Native Web Speech Recognition for dictation and communication cards.
+- **Speech-to-Text & Transcriber**: Browser Web Speech Recognition with selectable language, contextual NeuroCursor command hints, alternative transcript selection, interim text, punctuation, and guarded reconnects. Lower-confidence recognized speech is retained rather than silently discarded.
 - **Text-to-Speech Communication**: Browser-native Web Speech Synthesis with customizable voice profiles.
 - **Auralight Design System**: High-contrast, glassmorphic UI with customizable light/dark themes and responsive typography.
 
@@ -30,4 +30,4 @@ python main.py --source live --open-browser
 
 Open the local Flask page at `http://127.0.0.1:5000/`. If the camera is unavailable, the UI reports that Python vision is offline; it does not silently switch to browser capture or synthetic frames. Use `python main.py --source mock` only for simulation.
 
-Voice control requires a supported browser with its microphone permission enabled. Choose a cursor mode at launch and allow microphone access, then say `"Hey Cursor"` followed by a command. If voice listening is off, toggle the Voice pill. In Hybrid mode, the selected priority arbitrates cursor movement while speech is active. In Head or Hybrid mode, holding the cursor steady fills a green ring and performs one left click when complete; move away from the target to rearm it.
+Voice control requires a supported browser with its microphone permission enabled. On the Voice & Communication page, select your speaking language for both dictation and cursor commands. Choose a cursor mode at launch and allow microphone access, then say `"Hey Cursor"` followed by a command. If voice listening is off, toggle the Voice pill. In Hybrid mode, the selected priority arbitrates cursor movement while speech is active. The browser supplies the speech model; microphone gain and acoustic capture are controlled by the browser, operating system, and microphone.

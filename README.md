@@ -208,9 +208,13 @@ Gesture clicks require about 150-260ms of hold depending on the adaptive effort 
 3. **Optimized Speech-to-Text Conversion:**
    - **Live Interim Preview:** Real-time visual feedback renders interim spoken phrases in styled italic preview before committing finalized text.
    - **Spoken Punctuation Normalization:** Automatically converts verbalized punctuation ("question mark", "period", "comma", "exclamation point", "new line") to proper symbols and capitalizes sentence beginnings.
-   - **Acoustic Noise Filtering:** Low-confidence background acoustic noise (< 0.40) is ignored to prevent hallucinated words.
-   - **Continuous Reconnection:** Automatically resumes recognition across pauses without silent dropouts.
+   - **Language Selection:** Choose English (India/US/UK), Hindi, Bengali, Tamil, Telugu, or Urdu; the choice is saved for both dictation and cursor commands.
+   - **Better Recovery of Quiet Speech:** Dictation no longer discards recognized results just because the browser assigned low confidence; it compares available alternatives and keeps interim text visible.
+   - **Contextual Command Hints:** Supported browsers receive NeuroCursor wake-word, mode-switch, navigation, and click phrases as recognition hints.
+   - **Reliable Reconnection:** Recognition restarts once at a time after pauses or service disconnects, with clearer microphone and language errors.
    - **Expanded Voice Intent Dictionary:** Direct "Click [target]" or "Select [option]" voice commands automatically glide the cursor and trigger selection.
+
+   The speech model is provided by the browser. NeuroCursor improves language selection, phrase context, result handling, and recovery; actual microphone gain and recognition acoustics remain controlled by the user's browser, operating system, and microphone.
 
 ---
 

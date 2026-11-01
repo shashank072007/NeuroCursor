@@ -31,6 +31,7 @@ const state = {
   largeInterface: false,
   reducedAnimation: false,
   voiceFeedback: true,
+  speechLanguage: localStorage.getItem("neuro_speech_language") || navigator.language || "en-US",
   brushColor: "#24A98A",
   brushSize: 5,
   contacts: [
@@ -67,6 +68,27 @@ const pageTitles = {
   settings: "Personalisation",
   help: "Help & Guidance"
 };
+
+const SPEECH_LANGUAGE_OPTIONS = [
+  ["en-IN", "English (India)"],
+  ["en-US", "English (United States)"],
+  ["en-GB", "English (United Kingdom)"],
+  ["hi-IN", "Hindi (India)"],
+  ["bn-IN", "Bengali (India)"],
+  ["ta-IN", "Tamil (India)"],
+  ["te-IN", "Telugu (India)"],
+  ["ur-IN", "Urdu (India)"]
+];
+
+function speechLanguageOptionsHtml() {
+  const options = [...SPEECH_LANGUAGE_OPTIONS];
+  if (!options.some(([code]) => code.toLowerCase() === state.speechLanguage.toLowerCase())) {
+    options.unshift([state.speechLanguage, `Browser language (${state.speechLanguage})`]);
+  }
+  return options.map(([code, label]) =>
+    `<option value="${escapeHtml(code)}" ${code === state.speechLanguage ? "selected" : ""}>${escapeHtml(label)}</option>`
+  ).join("");
+}
 
 // Web Audio API for gentle acoustic feedback
 let audioCtx = null;
@@ -778,6 +800,55 @@ function getSpeechRecognitionCtor() {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
 }
 
+const NEUROCURSOR_SPEECH_HINTS = [
+  ["Hey Cursor", 6], ["Head Cursor", 5], ["Voice Cursor", 5], ["Speech Cursor", 5],
+  ["Physical Mouse", 4], ["switch to head cursor mode", 6], ["switch to voice cursor now", 6],
+  ["move cursor left", 5], ["move cursor right", 5], ["move cursor up", 5], ["move cursor down", 5],
+  ["point to center", 4], ["click that", 4], ["left click", 4], ["right click", 4],
+  ["pause cursor", 4], ["resume cursor", 4], ["speech priority", 4], ["head priority", 4],
+  ["transcribe speech", 4], ["calibration", 3], ["dwell click", 3]
+];
+
+function applySpeechRecognitionHints(recognition) {
+  if (!recognition || !("phrases" in recognition)) return;
+  try {
+    const Phrase = window.SpeechRecognitionPhrase || window.webkitSpeechRecognitionPhrase;
+    recognition.phrases = NEUROCURSOR_SPEECH_HINTS.map(([phrase, boost]) =>
+      Phrase ? new Phrase(phrase, boost) : { phrase, boost }
+    );
+  } catch (error) {
+    // Contextual phrase biasing is experimental and must not block basic recognition.
+    console.debug("[NeuroCursor] Speech phrase hints are unavailable in this browser.", error);
+  }
+}
+
+function chooseBestSpeechAlternative(result) {
+  if (!result || !result.length) return "";
+  let bestText = "";
+  let bestConfidence = -1;
+  for (let index = 0; index < result.length; index++) {
+    const alternative = result[index];
+    const transcript = String(alternative?.transcript || "").trim();
+    if (!transcript) continue;
+    const confidence = Number(alternative?.confidence);
+    const score = Number.isFinite(confidence) && confidence > 0 ? confidence : 0;
+    if (!bestText || score > bestConfidence) {
+      bestText = transcript;
+      bestConfidence = score;
+    }
+  }
+  return bestText;
+}
+
+function joinTranscriptChunks(current, next) {
+  const left = String(current || "").trimEnd();
+  const right = String(next || "").trim();
+  if (!left) return right;
+  if (!right) return left;
+  const needsSpace = !/[\s\n]$/.test(left) && !/^[,.;:!?%)}\]]/.test(right);
+  return `${left}${needsSpace ? " " : ""}${right}`;
+}
+
 function restartVoiceRecognizerSoon(delayMs = 220) {
   if (voiceRestartTimer) clearTimeout(voiceRestartTimer);
   const retryDelay = delayMs == null
@@ -858,8 +929,9 @@ function attachVoiceRecognizer() {
   const rec = new SpeechRec();
   rec.continuous = true;
   rec.interimResults = true;
-  rec.lang = navigator.language || "en-US";
-  rec.maxAlternatives = 3;
+  rec.lang = state.speechLanguage;
+  rec.maxAlternatives = 5;
+  applySpeechRecognitionHints(rec);
 
   rec.onstart = () => {
     if (voiceStartWatchdog) clearTimeout(voiceStartWatchdog);
@@ -2122,6 +2194,11 @@ function renderView() {
               ${state.isListening ? 'Speak naturally into your microphone.' : 'Convert voice into text with browser speech recognition.'}
             </p>
 
+            <label for="speech-language-select" style="font-size:0.82rem; font-weight:700; color:var(--text-muted);">Speaking language</label>
+            <select id="speech-language-select" class="topbar-control-select" aria-label="Speech recognition language" onchange="setSpeechRecognitionLanguage(this.value)">
+              ${speechLanguageOptionsHtml()}
+            </select>
+
             <div class="audio-waveform ${state.isListening ? 'active' : ''}">
               <div class="wave-bar"></div>
               <div class="wave-bar"></div>
@@ -2661,6 +2738,11 @@ function formatSpokenText(raw) {
     .replace(/\bexclamation point\b/gi, "!")
     .replace(/\bnew line\b/gi, "\n");
 
+  text = text
+    .replace(/[ \t]+([,.;!?])/g, "$1")
+    .replace(/([,;!?])(?=\S)/g, "$1 ")
+    .replace(/[ \t]+\n/g, "\n");
+
   // Capitalize sentence beginnings
   text = text.replace(/(^\w|[.!?]\s+\w)/g, c => c.toUpperCase());
   return text;
@@ -2683,21 +2765,51 @@ function updateTranscriptionDisplay() {
 
 // Speech Recognition & Virtual Keyboard
 let speechRecognition = null;
+let transcriptionRestartTimer = null;
+let transcriptionStarting = false;
+
+function setSpeechRecognitionLanguage(language) {
+  const nextLanguage = String(language || "").trim();
+  if (!nextLanguage || nextLanguage === state.speechLanguage) return;
+  state.speechLanguage = nextLanguage;
+  try { localStorage.setItem("neuro_speech_language", nextLanguage); } catch (error) {}
+  if (speechRecognition) {
+    speechRecognition.lang = nextLanguage;
+    if (state.isListening) {
+      try { speechRecognition.stop(); } catch (error) {}
+    }
+  }
+  if (voiceEngineArmed && !state.isListening) {
+    destroyVoiceRecognizer();
+    attachVoiceRecognizer();
+  }
+  showGestureToast(`Speech language: ${nextLanguage}. Recognition updated.`);
+}
+
+function scheduleTranscriptionRestart(delay = 260) {
+  if (transcriptionRestartTimer) clearTimeout(transcriptionRestartTimer);
+  transcriptionRestartTimer = setTimeout(() => {
+    transcriptionRestartTimer = null;
+    if (!state.isListening || !speechRecognition || transcriptionStarting) return;
+    try {
+      transcriptionStarting = true;
+      speechRecognition.start();
+    } catch (error) {
+      transcriptionStarting = false;
+      if (error && error.name === "InvalidStateError") scheduleTranscriptionRestart(300);
+      else {
+        state.isListening = false;
+        showGestureToast("Speech recognition stopped. Tap the microphone to try again.");
+        renderView();
+      }
+    }
+  }, delay);
+}
 
 function toggleSpeechRecognition() {
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRec) {
-    state.isListening = !state.isListening;
-    playSound(state.isListening ? "success" : "click");
-    if (state.isListening) {
-      setTimeout(() => {
-        state.transcriptionText += (state.transcriptionText ? " " : "") + "Hello NeuroCursor, I need a glass of water.";
-        state.isListening = false;
-        playSound("success");
-        renderView();
-      }, 2500);
-    }
-    renderView();
+    showGestureToast("Speech recognition is unavailable in this browser. Try Chrome or Edge.");
     return;
   }
 
@@ -2705,51 +2817,41 @@ function toggleSpeechRecognition() {
     speechRecognition = new SpeechRec();
     speechRecognition.continuous = true;
     speechRecognition.interimResults = true;
-    speechRecognition.lang = navigator.language || "en-US";
-    speechRecognition.maxAlternatives = 3;
+    speechRecognition.lang = state.speechLanguage;
+    speechRecognition.maxAlternatives = 5;
+    applySpeechRecognitionHints(speechRecognition);
+    try {
+      if ("unspokenPunctuation" in speechRecognition) speechRecognition.unspokenPunctuation = true;
+    } catch (error) {}
+
+    speechRecognition.onstart = () => {
+      transcriptionStarting = false;
+    };
 
     speechRecognition.onresult = (e) => {
-      let finalChunk = "";
-      let interimChunk = "";
+      const finalChunks = [];
+      const interimChunks = [];
 
       for (let i = e.resultIndex; i < e.results.length; ++i) {
         const res = e.results[i];
-        const transcript = res[0].transcript;
-        const confidence = res[0].confidence;
-
-        // Filter out low-confidence background acoustic noise
-        if (confidence !== undefined && confidence > 0 && confidence < 0.40) {
-          continue;
-        }
-
-        if (res.isFinal) {
-          finalChunk += transcript;
-        } else {
-          interimChunk += transcript;
-        }
+        const transcript = chooseBestSpeechAlternative(res);
+        if (!transcript) continue;
+        if (res.isFinal) finalChunks.push(transcript);
+        else interimChunks.push(transcript);
       }
 
-      if (finalChunk) {
-        const formatted = formatSpokenText(finalChunk);
-        if (formatted) {
-          state.transcriptionText += (state.transcriptionText ? " " : "") + formatted;
-        }
-        state.interimTranscription = "";
-      } else {
-        state.interimTranscription = interimChunk;
-      }
+      const finalText = formatSpokenText(finalChunks.join(" "));
+      if (finalText) state.transcriptionText = joinTranscriptChunks(state.transcriptionText, finalText);
+      state.interimTranscription = interimChunks.join(" ");
 
       updateTranscriptionDisplay();
     };
 
     // Auto-reconnect so pauses in speech do not silently terminate recognition
     speechRecognition.onend = () => {
+      transcriptionStarting = false;
       if (state.isListening) {
-        setTimeout(() => {
-          if (state.isListening && speechRecognition) {
-            try { speechRecognition.start(); } catch (err) {}
-          }
-        }, 150);
+        scheduleTranscriptionRestart();
       } else if (voiceEngineArmed) {
         restartVoiceRecognizerSoon(200);
       }
@@ -2757,10 +2859,20 @@ function toggleSpeechRecognition() {
 
     speechRecognition.onerror = (e) => {
       console.log("[Speech Recognition Error]", e.error);
-      if (e.error === "not-allowed") {
+      if (["not-allowed", "service-not-allowed", "audio-capture", "language-not-supported"].includes(e.error)) {
         state.isListening = false;
-        showGestureToast("⚠️ Microphone access denied. Please allow microphone permissions.");
+        transcriptionStarting = false;
+        if (transcriptionRestartTimer) clearTimeout(transcriptionRestartTimer);
+        transcriptionRestartTimer = null;
+        const message = e.error === "audio-capture"
+          ? "No microphone was found. Check the selected input device."
+          : e.error === "language-not-supported"
+            ? `The browser does not support ${state.speechLanguage}. Choose another language.`
+            : "Microphone access was denied. Allow microphone access in browser settings.";
+        showGestureToast(message);
         renderView();
+      } else if (e.error === "network") {
+        showGestureToast("Speech service disconnected. Reconnecting…");
       }
       // 'no-speech' is expected during quiet pauses; do not abort session
     };
@@ -2770,16 +2882,25 @@ function toggleSpeechRecognition() {
     if (voiceEngineArmed) {
       destroyVoiceRecognizer();
     }
+    state.isListening = true;
+    state.interimTranscription = "";
+    transcriptionStarting = true;
     try {
       speechRecognition.start();
-      state.isListening = true;
       playSound("success");
-      showGestureToast("🎙️ Speech Recognition Active: Speak naturally");
+      showGestureToast(`Listening in ${state.speechLanguage}. Speak naturally; recognized speech is kept at lower confidence too.`);
     } catch (e) {
-      state.isListening = true;
+      state.isListening = false;
+      transcriptionStarting = false;
+      showGestureToast(e && e.name === "NotAllowedError"
+        ? "Allow microphone access in browser settings, then try again."
+        : "Could not start speech recognition. Tap the microphone to retry.");
     }
   } else {
     state.isListening = false;
+    transcriptionStarting = false;
+    if (transcriptionRestartTimer) clearTimeout(transcriptionRestartTimer);
+    transcriptionRestartTimer = null;
     try { speechRecognition.stop(); } catch (e) {}
     playSound("click");
     showGestureToast("Speech recognition paused.");
@@ -2790,6 +2911,7 @@ function toggleSpeechRecognition() {
 
 function clearTranscription() {
   state.transcriptionText = "";
+  state.interimTranscription = "";
   playSound("click");
   const display = document.getElementById("transcription-display");
   if (display) display.innerHTML = '<span style="color:var(--text-faint);">Your spoken words or typed message will appear here...</span>';

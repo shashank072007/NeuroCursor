@@ -2019,6 +2019,8 @@ body.dark-mode .studio-canvas-zone {
   font-size: 0.76rem;
 }
 
+#speech-language-select { width: min(100%, 260px); max-width: 260px; }
+
 .sr-only {
   position: absolute;
   width: 1px;
